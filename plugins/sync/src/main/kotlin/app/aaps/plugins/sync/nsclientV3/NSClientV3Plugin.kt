@@ -53,8 +53,7 @@ import app.aaps.core.nssdk.remotemodel.LastModified
 import app.aaps.core.ui.compose.icons.IcPluginNsClient
 import app.aaps.core.ui.compose.preference.PreferenceSubScreenDef
 import app.aaps.plugins.sync.R
-import app.aaps.plugins.sync.nsShared.compose.NSClientComposeContent
-import app.aaps.plugins.sync.nsclient.ReceiverDelegate
+import app.aaps.plugins.sync.nsclientV3.compose.NSClientComposeContent
 import app.aaps.plugins.sync.nsclientV3.extensions.toNSBolus
 import app.aaps.plugins.sync.nsclientV3.extensions.toNSBolusWizard
 import app.aaps.plugins.sync.nsclientV3.extensions.toNSCarbs
@@ -408,10 +407,10 @@ class NSClientV3Plugin @Inject constructor(
         nsClientV3Service?.handleClearAlarm(originalAlarm, silenceTimeInMilliseconds)
     }
 
-    override suspend fun nsAdd(collection: String, dataPair: DataSyncSelector.DataPair, progress: String, profile: Profile?): Boolean =
+    suspend fun nsAdd(collection: String, dataPair: DataSyncSelector.DataPair, progress: String, profile: Profile? = null): Boolean =
         dbOperation(collection, dataPair, progress, Operation.CREATE, profile)
 
-    override suspend fun nsUpdate(collection: String, dataPair: DataSyncSelector.DataPair, progress: String, profile: Profile?): Boolean =
+    suspend fun nsUpdate(collection: String, dataPair: DataSyncSelector.DataPair, progress: String, profile: Profile? = null): Boolean =
         dbOperation(collection, dataPair, progress, Operation.UPDATE, profile)
 
     enum class Operation { CREATE, UPDATE }

@@ -109,7 +109,7 @@ class SmsCommunicatorPluginTest : TestBaseWithProfile() {
         // Without this, the gate sees null mode and PumpCommandGate.check throws NPE.
         runBlocking { whenever(loop.runningMode()).thenReturn(RM.Mode.CLOSED_LOOP) }
         smsCommunicatorPlugin = SmsCommunicatorPlugin(
-            aapsLogger, rh, smsManager, preferences, constraintChecker, rxBus, profileFunction, profileUtil, activePlugin, insulin, localProfileManager,
+            aapsLogger, rh, smsManager, preferences, constraintChecker, profileFunction, profileUtil, activePlugin, insulin, localProfileManager,
             commandQueue, loop, iobCobCalculator, xDripBroadcast, otp, config, dateUtilMocked, uel,
             smbGlucoseStatusProvider, persistenceLayer, decimalFormatter, configBuilder, pumpStatusProvider, notificationManager,
             runningModeGuard, testScope, repository
@@ -276,7 +276,9 @@ class SmsCommunicatorPluginTest : TestBaseWithProfile() {
             requester = Sms("1234", "ddd"),
             requestText = "RequestText",
             confirmCode = "ccode",
-            action = object : SmsAction(false) { override suspend fun run() {} },
+            action = object : SmsAction(false) {
+                override suspend fun run() {}
+            },
             aapsLogger = aapsLogger,
             smsCommunicator = smsCommunicatorPlugin,
             rh = rh,
@@ -509,33 +511,6 @@ class SmsCommunicatorPluginTest : TestBaseWithProfile() {
         smsCommunicatorPlugin.processSms(sms)
         assertThat(smsCommunicatorPlugin.messages[0].text).isEqualTo(smsCommand)
         assertThat(smsCommunicatorPlugin.messages[1].text).contains(rh.gs(R.string.smscommunicator_remote_command_not_possible))
-
-        //AAPSCLIENT RESTART
-        whenever(loop.runningMode()).thenReturn(RM.Mode.CLOSED_LOOP)
-        smsCommunicatorPlugin.messages = ArrayList()
-        sms = Sms("1234", "AAPSCLIENT RESTART")
-        smsCommunicatorPlugin.processSms(sms)
-        assertThat(sms.ignored).isFalse()
-        assertThat(smsCommunicatorPlugin.messages[0].text).isEqualTo("AAPSCLIENT RESTART")
-        assertThat(smsCommunicatorPlugin.messages[1].text).contains("AAPSCLIENT RESTART")
-
-        //AAPSCLIENT BLA BLA
-        whenever(loop.runningMode()).thenReturn(RM.Mode.CLOSED_LOOP)
-        smsCommunicatorPlugin.messages = ArrayList()
-        sms = Sms("1234", "AAPSCLIENT BLA BLA")
-        smsCommunicatorPlugin.processSms(sms)
-        assertThat(sms.ignored).isFalse()
-        assertThat(smsCommunicatorPlugin.messages[0].text).isEqualTo("AAPSCLIENT BLA BLA")
-        assertThat(smsCommunicatorPlugin.messages[1].text).isEqualTo("Wrong format")
-
-        //AAPSCLIENT BLABLA
-        whenever(loop.runningMode()).thenReturn(RM.Mode.CLOSED_LOOP_LGS)
-        smsCommunicatorPlugin.messages = ArrayList()
-        sms = Sms("1234", "AAPSCLIENT BLABLA")
-        smsCommunicatorPlugin.processSms(sms)
-        assertThat(sms.ignored).isFalse()
-        assertThat(smsCommunicatorPlugin.messages[0].text).isEqualTo("AAPSCLIENT BLABLA")
-        assertThat(smsCommunicatorPlugin.messages[1].text).isEqualTo("Wrong format")
 
         //PUMP
         smsCommunicatorPlugin.messages = ArrayList()

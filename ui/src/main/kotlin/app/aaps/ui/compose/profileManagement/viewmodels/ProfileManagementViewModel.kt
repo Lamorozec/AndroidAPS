@@ -454,7 +454,7 @@ class ProfileManagementViewModel @Inject constructor(
                 viewModelScope.launch {
                     persistenceLayer.insertAndCancelCurrentTemporaryTarget(
                         TT(
-                            timestamp = timestamp + 10000, // Add ten secs for proper NSCv1 sync
+                            timestamp = timestamp + 10000,
                             duration = TimeUnit.MINUTES.toMillis(durationMinutes.toLong()),
                             reason = TT.Reason.ACTIVITY,
                             lowTarget = targetMgdl,

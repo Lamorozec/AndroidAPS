@@ -8,18 +8,15 @@ import app.aaps.core.interfaces.nsclient.ProcessedDeviceStatusData
 import app.aaps.core.interfaces.nsclient.StoreDataForDb
 import app.aaps.core.interfaces.smsCommunicator.SmsCommunicator
 import app.aaps.core.interfaces.sync.DataSyncSelectorXdrip
+import app.aaps.core.interfaces.sync.NsClient
 import app.aaps.core.interfaces.sync.XDripBroadcast
 import app.aaps.plugins.sync.garmin.LoopHub
 import app.aaps.plugins.sync.garmin.LoopHubImpl
-import app.aaps.plugins.sync.nsShared.StoreDataForDbImpl
-import app.aaps.plugins.sync.nsShared.compose.NSClientRepositoryImpl
-import app.aaps.plugins.sync.nsclient.data.NSSettingsStatusImpl
-import app.aaps.plugins.sync.nsclient.data.ProcessedDeviceStatusDataImpl
-import app.aaps.plugins.sync.nsclient.services.NSClientService
-import app.aaps.plugins.sync.nsclient.workers.NSClientAddAckWorker
-import app.aaps.plugins.sync.nsclient.workers.NSClientAddUpdateWorker
-import app.aaps.plugins.sync.nsclient.workers.NSClientMbgWorker
-import app.aaps.plugins.sync.nsclient.workers.NSClientUpdateRemoveAckWorker
+import app.aaps.plugins.sync.nsclientV3.NSClientV3Plugin
+import app.aaps.plugins.sync.nsclientV3.StoreDataForDbImpl
+import app.aaps.plugins.sync.nsclientV3.compose.NSClientRepositoryImpl
+import app.aaps.plugins.sync.nsclientV3.data.NSSettingsStatusImpl
+import app.aaps.plugins.sync.nsclientV3.data.ProcessedDeviceStatusDataImpl
 import app.aaps.plugins.sync.nsclientV3.services.NSClientV3Service
 import app.aaps.plugins.sync.nsclientV3.workers.DataSyncWorker
 import app.aaps.plugins.sync.nsclientV3.workers.LoadBgWorker
@@ -56,12 +53,7 @@ import dagger.hilt.components.SingletonComponent
 @Suppress("unused")
 abstract class SyncModule {
 
-    @ContributesAndroidInjector abstract fun contributesNSClientService(): NSClientService
     @ContributesAndroidInjector abstract fun contributesNSClientV3Service(): NSClientV3Service
-    @ContributesAndroidInjector abstract fun contributesNSClientWorker(): NSClientAddUpdateWorker
-    @ContributesAndroidInjector abstract fun contributesNSClientAddAckWorker(): NSClientAddAckWorker
-    @ContributesAndroidInjector abstract fun contributesNSClientUpdateRemoveAckWorker(): NSClientUpdateRemoveAckWorker
-    @ContributesAndroidInjector abstract fun contributesNSClientMbgWorker(): NSClientMbgWorker
 
     @ContributesAndroidInjector abstract fun contributesLoadStatusWorker(): LoadStatusWorker
     @ContributesAndroidInjector abstract fun contributesLoadLastModificationWorker(): LoadLastModificationWorker
@@ -98,6 +90,7 @@ abstract class SyncModule {
         @Binds fun bindSmsCommunicator(smsCommunicatorPlugin: SmsCommunicatorPlugin): SmsCommunicator
         @Binds fun bindXDripBroadcastInterface(xDripBroadcastImpl: XdripPlugin): XDripBroadcast
         @Binds fun bindLoopHub(loopHub: LoopHubImpl): LoopHub
+        @Binds fun bindNsClient(nsClientV3Plugin: NSClientV3Plugin): NsClient
 
         @Binds fun bindNSClientRepository(nsClientRepositoryImpl: NSClientRepositoryImpl): NSClientRepository
     }

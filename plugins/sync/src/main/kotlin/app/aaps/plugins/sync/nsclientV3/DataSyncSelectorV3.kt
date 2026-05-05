@@ -17,7 +17,7 @@ import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.LongNonKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.utils.JsonHelper
-import app.aaps.plugins.sync.nsShared.extensions.onlyNsIdAdded
+import app.aaps.plugins.sync.nsclientV3.extensions.onlyNsIdAdded
 import app.aaps.plugins.sync.nsclientV3.keys.NsclientBooleanKey
 import app.aaps.plugins.sync.nsclientV3.keys.NsclientLongKey
 import dagger.Lazy
@@ -170,10 +170,10 @@ class DataSyncSelectorV3 @Inject constructor(
                         aapsLogger.info(LTag.NSCLIENT, "Ignoring Bolus. Only NS id changed: ${bolus.second.id} ")
                     // without nsId = create new
                     bolus.first.ids.nightscoutId == null                                      ->
-                        cont = activePlugin.activeNsClient?.nsAdd("treatments", DataSyncSelector.PairBolus(bolus.first, bolus.second.id), " $startId/$lastDbId") == true
+                        cont = nsClientV3Plugin.get().nsAdd("treatments", DataSyncSelector.PairBolus(bolus.first, bolus.second.id), " $startId/$lastDbId") == true
                     // with nsId = update if it's modified record
                     bolus.first.ids.nightscoutId != null && bolus.first.id != bolus.second.id ->
-                        cont = activePlugin.activeNsClient?.nsUpdate("treatments", DataSyncSelector.PairBolus(bolus.first, bolus.second.id), "$startId/$lastDbId") == true
+                        cont = nsClientV3Plugin.get().nsUpdate("treatments", DataSyncSelector.PairBolus(bolus.first, bolus.second.id), "$startId/$lastDbId") == true
                 }
                 if (cont) confirmLastBolusIdIfGreater(bolus.second.id)
             } ?: run {
@@ -213,10 +213,10 @@ class DataSyncSelectorV3 @Inject constructor(
                         aapsLogger.info(LTag.NSCLIENT, "Ignoring Carbs. Only NS id changed ID: ${carb.second.id} ")
                     // without nsId = create new
                     carb.first.ids.nightscoutId == null                                    ->
-                        cont = activePlugin.activeNsClient?.nsAdd("treatments", DataSyncSelector.PairCarbs(carb.first, carb.second.id), "$startId/$lastDbId") == true
+                        cont = nsClientV3Plugin.get().nsAdd("treatments", DataSyncSelector.PairCarbs(carb.first, carb.second.id), "$startId/$lastDbId") == true
                     // with nsId = update if it's modified record
                     carb.first.ids.nightscoutId != null && carb.first.id != carb.second.id ->
-                        cont = activePlugin.activeNsClient?.nsUpdate("treatments", DataSyncSelector.PairCarbs(carb.first, carb.second.id), "$startId/$lastDbId") == true
+                        cont = nsClientV3Plugin.get().nsUpdate("treatments", DataSyncSelector.PairCarbs(carb.first, carb.second.id), "$startId/$lastDbId") == true
                 }
                 if (cont) confirmLastCarbsIdIfGreater(carb.second.id)
             } ?: run {
@@ -256,14 +256,14 @@ class DataSyncSelectorV3 @Inject constructor(
                         aapsLogger.info(LTag.NSCLIENT, "Ignoring BolusCalculatorResult. Only NS id changed ID: ${bolusCalculatorResult.second.id} ")
                     // without nsId = create new
                     bolusCalculatorResult.first.ids.nightscoutId == null                                                                      ->
-                        cont = activePlugin.activeNsClient?.nsAdd(
+                        cont = nsClientV3Plugin.get().nsAdd(
                             "treatments",
                             DataSyncSelector.PairBolusCalculatorResult(bolusCalculatorResult.first, bolusCalculatorResult.second.id),
                             "$startId/$lastDbId"
                         ) == true
                     // with nsId = update if it's modified record
                     bolusCalculatorResult.first.ids.nightscoutId != null && bolusCalculatorResult.first.id != bolusCalculatorResult.second.id ->
-                        cont = activePlugin.activeNsClient?.nsUpdate(
+                        cont = nsClientV3Plugin.get().nsUpdate(
                             "treatments",
                             DataSyncSelector.PairBolusCalculatorResult(bolusCalculatorResult.first, bolusCalculatorResult.second.id),
                             "$startId/$lastDbId"
@@ -307,10 +307,10 @@ class DataSyncSelectorV3 @Inject constructor(
                         aapsLogger.info(LTag.NSCLIENT, "Ignoring TemporaryTarget. Only NS id changed ID: ${tt.second.id} ")
                     // without nsId = create new
                     tt.first.ids.nightscoutId == null                                ->
-                        cont = activePlugin.activeNsClient?.nsAdd("treatments", DataSyncSelector.PairTemporaryTarget(tt.first, tt.second.id), "$startId/$lastDbId") == true
+                        cont = nsClientV3Plugin.get().nsAdd("treatments", DataSyncSelector.PairTemporaryTarget(tt.first, tt.second.id), "$startId/$lastDbId") == true
                     // existing with nsId = update
                     tt.first.ids.nightscoutId != null                                ->
-                        cont = activePlugin.activeNsClient?.nsUpdate("treatments", DataSyncSelector.PairTemporaryTarget(tt.first, tt.second.id), "$startId/$lastDbId") == true
+                        cont = nsClientV3Plugin.get().nsUpdate("treatments", DataSyncSelector.PairTemporaryTarget(tt.first, tt.second.id), "$startId/$lastDbId") == true
                 }
                 if (cont) confirmLastTempTargetsIdIfGreater(tt.second.id)
             } ?: run {
@@ -351,10 +351,10 @@ class DataSyncSelectorV3 @Inject constructor(
                             aapsLogger.info(LTag.NSCLIENT, "Ignoring Food. Only NS id changed ID: ${food.second.id} ")
                         // without nsId = create new
                         food.first.ids.nightscoutId == null                                    ->
-                            cont = activePlugin.activeNsClient?.nsAdd("food", DataSyncSelector.PairFood(food.first, food.second.id), "$startId/$lastDbId") == true
+                            cont = nsClientV3Plugin.get().nsAdd("food", DataSyncSelector.PairFood(food.first, food.second.id), "$startId/$lastDbId") == true
                         // with nsId = update
                         food.first.ids.nightscoutId != null                                    ->
-                            cont = activePlugin.activeNsClient?.nsUpdate("food", DataSyncSelector.PairFood(food.first, food.second.id), "$startId/$lastDbId") == true
+                            cont = nsClientV3Plugin.get().nsUpdate("food", DataSyncSelector.PairFood(food.first, food.second.id), "$startId/$lastDbId") == true
                     }
                     if (cont) confirmLastFoodIdIfGreater(food.second.id)
                 } ?: run {
@@ -395,10 +395,10 @@ class DataSyncSelectorV3 @Inject constructor(
                             aapsLogger.info(LTag.NSCLIENT, "Ignoring GlucoseValue. Only NS id changed ID: ${gv.second.id} ")
                         // without nsId = create new
                         gv.first.ids.nightscoutId == null                                ->
-                            cont = activePlugin.activeNsClient?.nsAdd("entries", DataSyncSelector.PairGlucoseValue(gv.first, gv.second.id), "$startId/$lastDbId") == true
+                            cont = nsClientV3Plugin.get().nsAdd("entries", DataSyncSelector.PairGlucoseValue(gv.first, gv.second.id), "$startId/$lastDbId") == true
                         // with nsId = update
                         else                                                             ->  //  gv.first.interfaceIDs.nightscoutId != null
-                            cont = activePlugin.activeNsClient?.nsUpdate("entries", DataSyncSelector.PairGlucoseValue(gv.first, gv.second.id), "$startId/$lastDbId") == true
+                            cont = nsClientV3Plugin.get().nsUpdate("entries", DataSyncSelector.PairGlucoseValue(gv.first, gv.second.id), "$startId/$lastDbId") == true
                     }
                 }
                 if (cont) confirmLastGlucoseValueIdIfGreater(gv.second.id)
@@ -439,10 +439,10 @@ class DataSyncSelectorV3 @Inject constructor(
                         aapsLogger.info(LTag.NSCLIENT, "Ignoring TherapyEvent. Only NS id changed ID: ${te.second.id} ")
                     // without nsId = create new
                     te.first.ids.nightscoutId == null                                ->
-                        cont = activePlugin.activeNsClient?.nsAdd("treatments", DataSyncSelector.PairTherapyEvent(te.first, te.second.id), "$startId/$lastDbId") == true
+                        cont = nsClientV3Plugin.get().nsAdd("treatments", DataSyncSelector.PairTherapyEvent(te.first, te.second.id), "$startId/$lastDbId") == true
                     // nsId = update
                     te.first.ids.nightscoutId != null                                ->
-                        cont = activePlugin.activeNsClient?.nsUpdate("treatments", DataSyncSelector.PairTherapyEvent(te.first, te.second.id), "$startId/$lastDbId") == true
+                        cont = nsClientV3Plugin.get().nsUpdate("treatments", DataSyncSelector.PairTherapyEvent(te.first, te.second.id), "$startId/$lastDbId") == true
                 }
                 if (cont) confirmLastTherapyEventIdIfGreater(te.second.id)
             } ?: run {
@@ -473,7 +473,7 @@ class DataSyncSelectorV3 @Inject constructor(
             queueCounter.dssRemaining = lastDbId - startId
             nsClientRepository.updateQueueSize(queueCounter.size())
             persistenceLayer.getNextSyncElementDeviceStatus(startId)?.let { deviceStatus ->
-                cont = activePlugin.activeNsClient?.nsAdd("devicestatus", DataSyncSelector.PairDeviceStatus(deviceStatus, lastDbId), "$startId/$lastDbId") == true
+                cont = nsClientV3Plugin.get().nsAdd("devicestatus", DataSyncSelector.PairDeviceStatus(deviceStatus, lastDbId), "$startId/$lastDbId") == true
                 if (cont) confirmLastDeviceStatusIdIfGreater(deviceStatus.id)
                 // with nsId = ignore
             } ?: run {
@@ -514,10 +514,10 @@ class DataSyncSelectorV3 @Inject constructor(
                         aapsLogger.info(LTag.NSCLIENT, "Ignoring TemporaryBasal. Only NS id changed ID: ${tb.second.id} ")
                     // without nsId = create new
                     tb.first.ids.nightscoutId == null                                ->
-                        cont = activePlugin.activeNsClient?.nsAdd("treatments", DataSyncSelector.PairTemporaryBasal(tb.first, tb.second.id), "$startId/$lastDbId", profile) == true
+                        cont = nsClientV3Plugin.get().nsAdd("treatments", DataSyncSelector.PairTemporaryBasal(tb.first, tb.second.id), "$startId/$lastDbId", profile) == true
                     // with nsId = update
                     tb.first.ids.nightscoutId != null                                ->
-                        cont = activePlugin.activeNsClient?.nsUpdate("treatments", DataSyncSelector.PairTemporaryBasal(tb.first, tb.second.id), "$startId/$lastDbId", profile) == true
+                        cont = nsClientV3Plugin.get().nsUpdate("treatments", DataSyncSelector.PairTemporaryBasal(tb.first, tb.second.id), "$startId/$lastDbId", profile) == true
                 }
                 if (cont) confirmLastTemporaryBasalIdIfGreater(tb.second.id)
             } ?: run {
@@ -559,10 +559,10 @@ class DataSyncSelectorV3 @Inject constructor(
                             aapsLogger.info(LTag.NSCLIENT, "Ignoring ExtendedBolus. Only NS id changed ID: ${eb.second.id} ")
                         // without nsId = create new
                         eb.first.ids.nightscoutId == null                                ->
-                            cont = activePlugin.activeNsClient?.nsAdd("treatments", DataSyncSelector.PairExtendedBolus(eb.first, eb.second.id), "$startId/$lastDbId", profile) == true
+                            cont = nsClientV3Plugin.get().nsAdd("treatments", DataSyncSelector.PairExtendedBolus(eb.first, eb.second.id), "$startId/$lastDbId", profile) == true
                         // with nsId = update
                         eb.first.ids.nightscoutId != null                                ->
-                            cont = activePlugin.activeNsClient?.nsUpdate("treatments", DataSyncSelector.PairExtendedBolus(eb.first, eb.second.id), "$startId/$lastDbId", profile) == true
+                            cont = nsClientV3Plugin.get().nsUpdate("treatments", DataSyncSelector.PairExtendedBolus(eb.first, eb.second.id), "$startId/$lastDbId", profile) == true
                     }
                 } else aapsLogger.info(LTag.NSCLIENT, "Ignoring ExtendedBolus. No profile: ${eb.second.id} ")
                 if (cont) confirmLastExtendedBolusIdIfGreater(eb.second.id)
@@ -603,10 +603,10 @@ class DataSyncSelectorV3 @Inject constructor(
                         aapsLogger.info(LTag.NSCLIENT, "Ignoring ProfileSwitch. Only NS id changed ID: ${ps.second.id} ")
                     // without nsId = create new
                     ps.first.ids.nightscoutId == null                                ->
-                        cont = activePlugin.activeNsClient?.nsAdd("treatments", DataSyncSelector.PairProfileSwitch(ps.first, ps.second.id), "$startId/$lastDbId") == true
+                        cont = nsClientV3Plugin.get().nsAdd("treatments", DataSyncSelector.PairProfileSwitch(ps.first, ps.second.id), "$startId/$lastDbId") == true
                     // with nsId = update
                     ps.first.ids.nightscoutId != null                                ->
-                        cont = activePlugin.activeNsClient?.nsUpdate("treatments", DataSyncSelector.PairProfileSwitch(ps.first, ps.second.id), "$startId/$lastDbId") == true
+                        cont = nsClientV3Plugin.get().nsUpdate("treatments", DataSyncSelector.PairProfileSwitch(ps.first, ps.second.id), "$startId/$lastDbId") == true
                 }
                 if (cont) confirmLastProfileSwitchIdIfGreater(ps.second.id)
             } ?: run {
@@ -646,10 +646,10 @@ class DataSyncSelectorV3 @Inject constructor(
                         aapsLogger.info(LTag.NSCLIENT, "Ignoring EffectiveProfileSwitch. Only NS id changed ID: ${ps.second.id} ")
                     // without nsId = create new
                     ps.first.ids.nightscoutId == null                                ->
-                        cont = activePlugin.activeNsClient?.nsAdd("treatments", DataSyncSelector.PairEffectiveProfileSwitch(ps.first, ps.second.id), "$startId/$lastDbId") == true
+                        cont = nsClientV3Plugin.get().nsAdd("treatments", DataSyncSelector.PairEffectiveProfileSwitch(ps.first, ps.second.id), "$startId/$lastDbId") == true
                     // with nsId = update
                     ps.first.ids.nightscoutId != null                                ->
-                        cont = activePlugin.activeNsClient?.nsUpdate("treatments", DataSyncSelector.PairEffectiveProfileSwitch(ps.first, ps.second.id), "$startId/$lastDbId") == true
+                        cont = nsClientV3Plugin.get().nsUpdate("treatments", DataSyncSelector.PairEffectiveProfileSwitch(ps.first, ps.second.id), "$startId/$lastDbId") == true
                 }
                 if (cont) confirmLastEffectiveProfileSwitchIdIfGreater(ps.second.id)
             } ?: run {
@@ -689,10 +689,10 @@ class DataSyncSelectorV3 @Inject constructor(
                         aapsLogger.info(LTag.NSCLIENT, "Ignoring RunningMode. Only NS id changed ID: ${rm.second.id} ")
                     // without nsId = create new
                     rm.first.ids.nightscoutId == null                                ->
-                        cont = activePlugin.activeNsClient?.nsAdd("treatments", DataSyncSelector.PairRunningMode(rm.first, rm.second.id), "$startId/$lastDbId") == true
+                        cont = nsClientV3Plugin.get().nsAdd("treatments", DataSyncSelector.PairRunningMode(rm.first, rm.second.id), "$startId/$lastDbId") == true
                     // existing with nsId = update
                     rm.first.ids.nightscoutId != null                                ->
-                        cont = activePlugin.activeNsClient?.nsUpdate("treatments", DataSyncSelector.PairRunningMode(rm.first, rm.second.id), "$startId/$lastDbId") == true
+                        cont = nsClientV3Plugin.get().nsUpdate("treatments", DataSyncSelector.PairRunningMode(rm.first, rm.second.id), "$startId/$lastDbId") == true
                 }
                 if (cont) confirmLastRunningModeIdIfGreater(rm.second.id)
             } ?: run {
@@ -724,7 +724,7 @@ class DataSyncSelectorV3 @Inject constructor(
             if (JsonHelper.safeGetLongAllowNull(profileJson, "date") == null)
                 profileJson.put("date", profileStore.getStartDate())
             val now = dateUtil.now()
-            if (activePlugin.activeNsClient?.nsAdd("profile", DataSyncSelector.PairProfileStore(profileJson, now), "") == true)
+            if (nsClientV3Plugin.get().nsAdd("profile", DataSyncSelector.PairProfileStore(profileJson, now), ""))
                 confirmLastProfileStore(now)
         }
     }

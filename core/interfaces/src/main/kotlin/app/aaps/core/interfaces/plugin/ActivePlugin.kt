@@ -70,11 +70,6 @@ interface ActivePlugin {
     val activeSmoothing: Smoothing
 
     /**
-     *  Currently selected NsClient plugin
-     */
-    val activeNsClient: NsClient?
-
-    /**
      *  Currently selected Sync plugin
      */
     val firstActiveSync: Sync?

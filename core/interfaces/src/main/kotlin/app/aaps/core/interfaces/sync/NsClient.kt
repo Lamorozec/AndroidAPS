@@ -1,7 +1,6 @@
 package app.aaps.core.interfaces.sync
 
 import app.aaps.core.interfaces.nsclient.NSAlarm
-import app.aaps.core.interfaces.profile.Profile
 
 /**
  * Plugin providing communication with Nightscout server
@@ -39,16 +38,14 @@ interface NsClient : Sync {
     enum class Collection { ENTRIES, TREATMENTS, FOODS, PROFILE, SETTINGS }
 
     /**
-     * NSC v3 does first load of all data
-     * next loads are using srvModified property for sync
-     * not used for NSCv1
+     * First load downloads all data; next loads use srvModified for sync.
      *
-     * @return true if inside first load of NSCv3, true for NSCv1
+     * @return true while inside the first load
      */
     fun isFirstLoad(collection: Collection): Boolean = true
 
     /**
-     * Update newest loaded timestamp for entries collection (first load or NSCv1)
+     * Update newest loaded timestamp for entries collection (first load)
      * Update newest srvModified (sync loads)
      *
      * @param latestReceived timestamp
@@ -57,7 +54,7 @@ interface NsClient : Sync {
     fun updateLatestBgReceivedIfNewer(latestReceived: Long)
 
     /**
-     * Update newest loaded timestamp for treatments collection (first load or NSCv1)
+     * Update newest loaded timestamp for treatments collection (first load)
      * Update newest srvModified (sync loads)
      *
      * @param latestReceived timestamp
@@ -79,24 +76,4 @@ interface NsClient : Sync {
      * Next synchronization will start from scratch
      */
     suspend fun resetToFullSync()
-
-    /**
-     * Upload new record to NS
-     *
-     * @param collection target ns collection
-     * @param dataPair data to upload (data.first) and id of changed record (data.second)
-     * @param progress progress of sync in format "number/number". Only for display in fragment
-     * @return true for successful upload
-     */
-    suspend fun nsAdd(collection: String, dataPair: DataSyncSelector.DataPair, progress: String, profile: Profile? = null): Boolean
-
-    /**
-     * Upload updated record to NS
-     *
-     * @param collection target ns collection
-     * @param dataPair data to upload (data.first) and id of changed record (data.second)
-     * @param progress progress of sync in format "number/number". Only for display in fragment
-     * @return true for successful upload
-     */
-    suspend fun nsUpdate(collection: String, dataPair: DataSyncSelector.DataPair, progress: String, profile: Profile? = null): Boolean
 }
