@@ -310,8 +310,13 @@ class OpenAPSAMAPlugin @Inject constructor(
         return value
     }
 
-    // Needed only for dynamic ISF so far
-    override val syncedKeys: List<NonPreferenceKey> = emptyList()
+    // ApsUseAutosens gates whether autosens runs and feeds the sensitivity ratio into COB.
+    // (ApsAmaMin5MinCarbsImpact lives on the AMA preference screen but is consumed by COB
+    // calc whenever the active sensitivity is non-Oref1, regardless of which APS is active —
+    // so it's owned by the AAPS / WeightedAverage sensitivity plugins, not by AMA.)
+    override val syncedKeys: List<NonPreferenceKey> = listOf(
+        BooleanKey.ApsUseAutosens
+    )
 
     override fun reloadInternalState() {}
 

@@ -172,7 +172,7 @@ private fun ActiveSceneBannerTimedPreview() {
                     scene = sampleScene(),
                     activatedAt = now - 30 * 60_000L, // started 30 min ago
                     durationMs = 60 * 60_000L,        // 60 min total
-                    priorState = ActiveSceneState.PriorState()
+                    scopedRecords = ActiveSceneState.ScopedRecords()
                 ),
                 onEndClick = {}
             )
@@ -191,7 +191,7 @@ private fun ActiveSceneBannerExpiredPreview() {
                     scene = sampleScene(),
                     activatedAt = now - 60 * 60_000L,
                     durationMs = 60 * 60_000L,
-                    priorState = ActiveSceneState.PriorState()
+                    scopedRecords = ActiveSceneState.ScopedRecords()
                 ),
                 expired = true,
                 onEndClick = {},
@@ -212,7 +212,7 @@ private fun ActiveSceneBannerIndefinitePreview() {
                     scene = sampleScene("Sick Day"),
                     activatedAt = now - 120 * 60_000L,
                     durationMs = 0, // indefinite
-                    priorState = ActiveSceneState.PriorState()
+                    scopedRecords = ActiveSceneState.ScopedRecords()
                 ),
                 onEndClick = {}
             )

@@ -3,6 +3,7 @@ package app.aaps.ui.di
 import app.aaps.core.interfaces.iob.IobCobCalculator
 import app.aaps.core.interfaces.overview.graph.GraphConfigRepository
 import app.aaps.core.interfaces.overview.graph.OverviewDataCache
+import app.aaps.core.interfaces.scenes.ActiveSceneSync
 import app.aaps.core.interfaces.scenes.SceneAutomationApi
 import app.aaps.core.interfaces.scenes.Scenes
 import app.aaps.core.interfaces.widget.WidgetUpdater
@@ -11,6 +12,7 @@ import app.aaps.core.ui.search.SearchableProvider
 import app.aaps.ui.activities.ErrorActivity
 import app.aaps.ui.compose.overview.OverviewDataCacheFactory
 import app.aaps.ui.compose.overview.graphs.GraphConfigRepositoryImpl
+import app.aaps.ui.compose.scenes.ActiveSceneManager
 import app.aaps.ui.compose.scenes.SceneAutomationApiImpl
 import app.aaps.ui.compose.scenes.SceneRepository
 
@@ -48,6 +50,8 @@ abstract class UiModule {
         @Binds fun bindSceneAutomationApi(impl: SceneAutomationApiImpl): SceneAutomationApi
 
         @Binds fun bindScenes(impl: SceneRepository): Scenes
+
+        @Binds fun bindActiveSceneSync(impl: ActiveSceneManager): ActiveSceneSync
 
         @Binds @IntoSet fun bindBuiltInSearchables(impl: BuiltInSearchables): SearchableProvider
         @Binds @IntoSet fun bindDialogSearchables(impl: DialogSearchables): SearchableProvider

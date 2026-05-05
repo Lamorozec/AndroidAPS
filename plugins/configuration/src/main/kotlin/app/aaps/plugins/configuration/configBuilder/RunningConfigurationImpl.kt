@@ -21,13 +21,17 @@ import app.aaps.core.interfaces.nsclient.NSClientRepository
 import app.aaps.core.interfaces.plugin.ActivePlugin
 import app.aaps.core.interfaces.pump.PumpSync
 import app.aaps.core.interfaces.pump.defs.fillFor
+import app.aaps.core.interfaces.scenes.ActiveSceneSnapshot
+import app.aaps.core.interfaces.scenes.ActiveSceneSync
 import app.aaps.core.interfaces.scenes.Scenes
 import app.aaps.core.interfaces.smoothing.Smoothing
 import app.aaps.core.keys.BooleanNonKey
 import app.aaps.core.keys.StringKey
+import app.aaps.core.keys.StringNonKey
 import app.aaps.core.keys.interfaces.NonPreferenceKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.nssdk.interfaces.RunningConfiguration
+import app.aaps.core.nssdk.localmodel.configuration.NSActiveScene
 import app.aaps.core.nssdk.localmodel.configuration.NSRunningConfiguration
 import app.aaps.core.objects.extensions.put
 import app.aaps.core.objects.extensions.store
@@ -45,6 +49,7 @@ class RunningConfigurationImpl @Inject constructor(
     private val insulin: Insulin,
     private val quickWizard: QuickWizard,
     private val scenes: Scenes,
+    private val activeSceneSync: ActiveSceneSync,
     private val automation: Automation,
     private val configBuilder: ConfigBuilder,
     private val preferences: Preferences,
@@ -83,6 +88,17 @@ class RunningConfigurationImpl @Inject constructor(
             json.put("quickWizardConfiguration", JSONObject(buildFromPlugin(quickWizard).toString()))
             json.put("scenesConfiguration", JSONObject(buildFromPlugin(scenes).toString()))
             json.put("automationConfiguration", JSONObject(buildFromPlugin(automation).toString()))
+            activeSceneSync.activeSceneSnapshot()?.let { snapshot ->
+                json.put("activeScene", JSONObject().apply {
+                    put("sceneId", snapshot.sceneId)
+                    put("activatedAt", snapshot.activatedAt)
+                    put("durationMs", snapshot.durationMs)
+                    snapshot.ttNsId?.let { put("ttNsId", it) }
+                    snapshot.psNsId?.let { put("psNsId", it) }
+                    snapshot.rmNsId?.let { put("rmNsId", it) }
+                    snapshot.teNsId?.let { put("teNsId", it) }
+                })
+            }
             json.put("pump", pumpInterface.model().description)
             json.put("version", config.VERSION_NAME)
         } catch (e: JSONException) {
@@ -107,6 +123,7 @@ class RunningConfigurationImpl @Inject constructor(
         keys += scenes.syncedKeys
         keys += automation.syncedKeys
         keys += SyncedConfigSchema.overviewKeys
+        keys += StringNonKey.ActiveScene
         return keys.distinctBy { it.key }
     }
 
@@ -189,7 +206,22 @@ class RunningConfigurationImpl @Inject constructor(
         configuration.automationConfiguration?.let { ac ->
             applyToPlugin(automation, ac)
         }
+
+        // activeScene: null on the wire means "no scene active" — clear locally.
+        // Always pass through (even null) so master-side dismissal propagates.
+        activeSceneSync.applyActiveScene(configuration.activeScene?.toSnapshot())
     }
+
+    private fun NSActiveScene.toSnapshot() =
+        ActiveSceneSnapshot(
+            sceneId = sceneId,
+            activatedAt = activatedAt,
+            durationMs = durationMs,
+            ttNsId = ttNsId,
+            psNsId = psNsId,
+            rmNsId = rmNsId,
+            teNsId = teNsId
+        )
 
     private fun buildFromPlugin(plugin: ConfigExportImport): JsonObject =
         plugin.syncedKeys.fold(JsonObject(emptyMap())) { acc, k -> acc.put(k, preferences) }

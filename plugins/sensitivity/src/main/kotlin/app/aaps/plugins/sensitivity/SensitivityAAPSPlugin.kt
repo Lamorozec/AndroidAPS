@@ -153,6 +153,9 @@ class SensitivityAAPSPlugin @Inject constructor(
         DoubleKey.AbsorptionMaxTime,
         DoubleKey.AutosensMin,
         DoubleKey.AutosensMax,
+        // COB calc reads ApsAmaMin5MinCarbsImpact whenever isOref1=false (this plugin) —
+        // ownership is here even though the UI for it lives on the AMA APS screen.
+        DoubleKey.ApsAmaMin5MinCarbsImpact,
     )
 
     override fun reloadInternalState() {}

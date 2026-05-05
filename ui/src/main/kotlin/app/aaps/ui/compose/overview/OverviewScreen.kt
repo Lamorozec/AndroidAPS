@@ -94,11 +94,11 @@ fun OverviewScreen(
         }
     }
 
-    val runningModeSceneManaged = activeSceneState?.priorState?.sceneRunningModeId
+    val runningModeSceneManaged = activeSceneState?.scopedRecords?.rmId
         ?.let { it == runningModeRecordId && it > 0 } == true
-    val tempTargetSceneManaged = activeSceneState?.priorState?.sceneTtId
+    val tempTargetSceneManaged = activeSceneState?.scopedRecords?.ttId
         ?.let { it == tempTargetRecordId && it > 0 } == true
-    val profileSceneManaged = activeSceneState?.priorState?.scenePsId
+    val profileSceneManaged = activeSceneState?.scopedRecords?.psId
         ?.let { it == profilePsId && it > 0 } == true
 
     val isTablet = LocalConfiguration.current.smallestScreenWidthDp >= TABLET_MIN_SW_DP

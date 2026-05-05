@@ -1,28 +1,53 @@
 package app.aaps.ui.compose.scenes
 
 import app.aaps.core.data.model.ActiveSceneState
+import app.aaps.core.data.model.ActiveSceneState.ScopedRecords
+import app.aaps.core.data.model.PS
+import app.aaps.core.data.model.RM
+import app.aaps.core.data.model.TE
+import app.aaps.core.data.model.TT
+import app.aaps.core.interfaces.db.PersistenceLayer
+import app.aaps.core.interfaces.db.observeChanges
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
+import app.aaps.core.interfaces.scenes.ActiveSceneSnapshot
+import app.aaps.core.interfaces.scenes.ActiveSceneSync
 import app.aaps.core.keys.StringNonKey
 import app.aaps.core.keys.interfaces.Preferences
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import org.json.JSONObject
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
  * Manages the currently active scene state.
- * Persists to SharedPreferences via StringNonKey.ActiveScene.
- * Exposes a StateFlow for reactive UI updates.
+ *
+ * Persists to SharedPreferences via [StringNonKey.ActiveScene] and exposes a [StateFlow]
+ * for reactive UI updates. Also implements [ActiveSceneSync] so the NS settings publisher
+ * can read a wire-shaped snapshot of the running scene, and so the client can apply one.
+ *
+ * Cross-device chip parity: [ScopedRecords] carries each scoped record's local Room ID
+ * AND its NS identifier. A background subscription to record-change flows fills in the
+ * missing half whenever it can — on master, the NS id once the record is uploaded; on
+ * client, the local Room id once the underlying record syncs. Either side may briefly
+ * have only one half populated; chips that depend on the local Room id fade in once it
+ * arrives.
  */
 @Singleton
 class ActiveSceneManager @Inject constructor(
     private val preferences: Preferences,
     private val sceneRepository: SceneRepository,
+    private val persistenceLayer: PersistenceLayer,
     private val aapsLogger: AAPSLogger
-) {
+) : ActiveSceneSync {
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val _activeSceneState = MutableStateFlow<ActiveSceneState?>(null)
     private val _expired = MutableStateFlow(false)
@@ -34,8 +59,15 @@ class ActiveSceneManager @Inject constructor(
     val expired: StateFlow<Boolean> = _expired.asStateFlow()
 
     init {
-        // Restore from preferences on startup
         _activeSceneState.value = loadActiveState()
+
+        // Backfill the missing half of each scoped record id pair as the underlying
+        // records change. Symmetric: on master we have Room ids and watch for NS ids
+        // to land; on client we have NS ids and watch for matching Room ids to appear.
+        scope.launch { persistenceLayer.observeChanges<TT>().collect { reconcileTt(it) } }
+        scope.launch { persistenceLayer.observeChanges<PS>().collect { reconcilePs(it) } }
+        scope.launch { persistenceLayer.observeChanges<RM>().collect { reconcileRm(it) } }
+        scope.launch { persistenceLayer.observeChanges<TE>().collect { reconcileTe(it) } }
     }
 
     /** Set the active scene state (called by SceneExecutor on activation) */
@@ -72,20 +104,134 @@ class ActiveSceneManager @Inject constructor(
     /** Get the current active state */
     fun getActiveState(): ActiveSceneState? = _activeSceneState.value
 
-    /** Update the prior state (called after scene activation to store record IDs) */
-    fun updatePriorState(priorState: ActiveSceneState.PriorState) {
+    /** Update the scoped record set (called after scene activation to store record IDs) */
+    fun updateScopedRecords(scopedRecords: ScopedRecords) {
         val state = _activeSceneState.value ?: return
-        val updated = state.copy(priorState = priorState)
+        if (state.scopedRecords == scopedRecords) return
+        val updated = state.copy(scopedRecords = scopedRecords)
         _activeSceneState.value = updated
         persistActiveState(updated)
     }
+
+    // --- ActiveSceneSync ---
+
+    override fun activeSceneSnapshot(): ActiveSceneSnapshot? =
+        _activeSceneState.value?.let {
+            ActiveSceneSnapshot(
+                sceneId = it.scene.id,
+                activatedAt = it.activatedAt,
+                durationMs = it.durationMs,
+                ttNsId = it.scopedRecords.ttNsId,
+                psNsId = it.scopedRecords.psNsId,
+                rmNsId = it.scopedRecords.rmNsId,
+                teNsId = it.scopedRecords.teNsId
+            )
+        }
+
+    override fun applyActiveScene(snapshot: ActiveSceneSnapshot?) {
+        if (snapshot == null) {
+            if (_activeSceneState.value == null) return
+            aapsLogger.info(LTag.UI, "ActiveSceneManager.applyActiveScene(null) — clearing")
+            clearActive()
+            return
+        }
+        val scene = sceneRepository.getScene(snapshot.sceneId)
+        if (scene == null) {
+            aapsLogger.info(LTag.UI, "ActiveSceneManager.applyActiveScene: unknown sceneId='${snapshot.sceneId}', clearing")
+            if (_activeSceneState.value != null) clearActive()
+            return
+        }
+        // Apply immediately with NS ids only; Room ids resolve asynchronously below.
+        val initial = ActiveSceneState(
+            scene = scene,
+            activatedAt = snapshot.activatedAt,
+            durationMs = snapshot.durationMs,
+            priorSmb = null,                 // master-only, never on the wire
+            scopedRecords = ScopedRecords(
+                ttNsId = snapshot.ttNsId,
+                psNsId = snapshot.psNsId,
+                rmNsId = snapshot.rmNsId,
+                teNsId = snapshot.teNsId
+            )
+        )
+        if (initial == _activeSceneState.value) return
+        aapsLogger.info(LTag.UI, "ActiveSceneManager.applyActiveScene('${scene.name}')")
+        _activeSceneState.value = initial
+        _expired.value = false
+        persistActiveState(initial)
+        scope.launch { resolveRoomIdsForCurrent() }
+    }
+
+    private suspend fun resolveRoomIdsForCurrent() {
+        val state = _activeSceneState.value ?: return
+        val sr = state.scopedRecords
+        val ttId = sr.ttId ?: sr.ttNsId?.let { persistenceLayer.getTemporaryTargetByNSId(it)?.id }
+        val psId = sr.psId ?: sr.psNsId?.let { persistenceLayer.getProfileSwitchByNSId(it)?.id }
+        val rmId = sr.rmId ?: sr.rmNsId?.let { persistenceLayer.getRunningModeByNSId(it)?.id }
+        val teId = sr.teId ?: sr.teNsId?.let { persistenceLayer.getTherapyEventByNSId(it)?.id }
+        val resolved = sr.copy(ttId = ttId, psId = psId, rmId = rmId, teId = teId)
+        if (resolved != sr) updateScopedRecords(resolved)
+    }
+
+    // --- Symmetric backfill: fill the missing half of each id pair on record change ---
+
+    private fun reconcileTt(records: List<TT>) {
+        val sr = _activeSceneState.value?.scopedRecords ?: return
+        val (id, nsId) = pickPair(records, sr.ttId, sr.ttNsId) { it.id to it.ids.nightscoutId } ?: return
+        updateScopedRecords(sr.copy(ttId = id, ttNsId = nsId))
+    }
+
+    private fun reconcilePs(records: List<PS>) {
+        val sr = _activeSceneState.value?.scopedRecords ?: return
+        val (id, nsId) = pickPair(records, sr.psId, sr.psNsId) { it.id to it.ids.nightscoutId } ?: return
+        updateScopedRecords(sr.copy(psId = id, psNsId = nsId))
+    }
+
+    private fun reconcileRm(records: List<RM>) {
+        val sr = _activeSceneState.value?.scopedRecords ?: return
+        val (id, nsId) = pickPair(records, sr.rmId, sr.rmNsId) { it.id to it.ids.nightscoutId } ?: return
+        updateScopedRecords(sr.copy(rmId = id, rmNsId = nsId))
+    }
+
+    private fun reconcileTe(records: List<TE>) {
+        val sr = _activeSceneState.value?.scopedRecords ?: return
+        val (id, nsId) = pickPair(records, sr.teId, sr.teNsId) { it.id to it.ids.nightscoutId } ?: return
+        updateScopedRecords(sr.copy(teId = id, teNsId = nsId))
+    }
+
+    /**
+     * Find a record matching the half of the pair we already know, return the completed
+     * pair if one or both halves can be filled. Returns null when nothing changes:
+     * already complete, nothing to match, no record matches, or matched record's NS id
+     * is still null (master case waiting for upload).
+     */
+    private inline fun <T> pickPair(
+        records: List<T>,
+        knownId: Long?,
+        knownNsId: String?,
+        idsOf: (T) -> Pair<Long, String?>
+    ): Pair<Long, String?>? {
+        if (knownId != null && knownNsId != null) return null         // already complete
+        if (knownId == null && knownNsId == null) return null         // nothing to match
+        val match = records.firstOrNull { r ->
+            val (id, nsId) = idsOf(r)
+            (knownId != null && id == knownId) || (knownNsId != null && nsId == knownNsId)
+        } ?: return null
+        val (mId, mNsId) = idsOf(match)
+        // Master case (we know Room id): matched record's NS id may still be null — wait.
+        if (knownId != null && mNsId == null) return null
+        return mId to (knownNsId ?: mNsId)
+    }
+
+    // --- Persistence ---
 
     private fun persistActiveState(state: ActiveSceneState) {
         val json = JSONObject().apply {
             put("sceneId", state.scene.id)
             put("activatedAt", state.activatedAt)
             put("durationMs", state.durationMs)
-            put("priorState", state.priorState.toJson())
+            state.priorSmb?.let { put("priorSmb", it) }
+            put("scopedRecords", state.scopedRecords.toJson())
         }
         preferences.put(StringNonKey.ActiveScene, json.toString())
     }
@@ -97,12 +243,12 @@ class ActiveSceneManager @Inject constructor(
             val json = JSONObject(raw)
             val sceneId = json.getString("sceneId")
             val scene = sceneRepository.getScene(sceneId) ?: return null
-            val priorJson = json.getJSONObject("priorState")
             ActiveSceneState(
                 scene = scene,
                 activatedAt = json.getLong("activatedAt"),
                 durationMs = json.getLong("durationMs"),
-                priorState = priorJson.toPriorState()
+                priorSmb = if (json.has("priorSmb")) json.getBoolean("priorSmb") else null,
+                scopedRecords = json.optJSONObject("scopedRecords")?.toScopedRecords() ?: ScopedRecords()
             )
         } catch (_: Exception) {
             null
@@ -110,20 +256,33 @@ class ActiveSceneManager @Inject constructor(
     }
 }
 
-// --- PriorState serialization ---
+// --- ScopedRecords serialization ---
 
-private fun ActiveSceneState.PriorState.toJson(): JSONObject = JSONObject().apply {
-    smbEnabled?.let { put("smbEnabled", it) }
-    sceneTtId?.let { put("sceneTtId", it) }
-    scenePsId?.let { put("scenePsId", it) }
-    sceneRunningModeId?.let { put("sceneRunningModeId", it) }
-    sceneTherapyEventId?.let { put("sceneTherapyEventId", it) }
+private fun ScopedRecords.toJson(): JSONObject = JSONObject().apply {
+    ttId?.let { put("ttId", it) }
+    ttNsId?.let { put("ttNsId", it) }
+    psId?.let { put("psId", it) }
+    psNsId?.let { put("psNsId", it) }
+    rmId?.let { put("rmId", it) }
+    rmNsId?.let { put("rmNsId", it) }
+    teId?.let { put("teId", it) }
+    teNsId?.let { put("teNsId", it) }
 }
 
-private fun JSONObject.toPriorState(): ActiveSceneState.PriorState = ActiveSceneState.PriorState(
-    smbEnabled = if (has("smbEnabled")) getBoolean("smbEnabled") else null,
-    sceneTtId = if (has("sceneTtId")) getLong("sceneTtId") else null,
-    scenePsId = if (has("scenePsId")) getLong("scenePsId") else null,
-    sceneRunningModeId = if (has("sceneRunningModeId")) getLong("sceneRunningModeId") else null,
-    sceneTherapyEventId = if (has("sceneTherapyEventId")) getLong("sceneTherapyEventId") else null
-)
+private fun JSONObject.toScopedRecords(): ScopedRecords =
+    ScopedRecords(
+        ttId = optLongOrNull("ttId"),
+        ttNsId = optStringOrNull("ttNsId"),
+        psId = optLongOrNull("psId"),
+        psNsId = optStringOrNull("psNsId"),
+        rmId = optLongOrNull("rmId"),
+        rmNsId = optStringOrNull("rmNsId"),
+        teId = optLongOrNull("teId"),
+        teNsId = optStringOrNull("teNsId")
+    )
+
+private fun JSONObject.optLongOrNull(key: String): Long? =
+    if (has(key)) getLong(key) else null
+
+private fun JSONObject.optStringOrNull(key: String): String? =
+    if (has(key) && !isNull(key)) getString(key) else null

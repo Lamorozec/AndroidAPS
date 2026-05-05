@@ -275,7 +275,6 @@ class SceneListViewModel @Inject constructor(
 
     private fun buildRevertSummaries(activeState: ActiveSceneState): List<String> {
         val summaries = mutableListOf<String>()
-        val prior = activeState.priorState
         var hasCarePortal = false
 
         for (action in activeState.scene.actions) {
@@ -289,7 +288,7 @@ class SceneListViewModel @Inject constructor(
                 }
 
                 is SceneAction.SmbToggle       -> {
-                    val wasEnabled = prior.smbEnabled ?: true
+                    val wasEnabled = activeState.priorSmb ?: true
                     summaries.add(
                         if (wasEnabled) rh.gs(R.string.scene_revert_smb_on)
                         else rh.gs(R.string.scene_revert_smb_off)

@@ -519,6 +519,8 @@ open class OpenAPSAutoISFPlugin @Inject constructor(
     override val syncedKeys: List<NonPreferenceKey> = listOf(
         BooleanKey.ApsUseDynamicSensitivity,
         IntKey.ApsDynIsfAdjustmentFactor,
+        // ApsUseAutosens gates autosens; affects sensitivity ratio fed into COB calc.
+        BooleanKey.ApsUseAutosens,
     )
 
     override fun reloadInternalState() {}

@@ -86,15 +86,15 @@ class SceneExecutor @Inject constructor(
         val durationMs = T.mins(durationMinutes.toLong()).msecs()
         aapsLogger.info(LTag.UI, "XXXX activate() now=$now durationMs=$durationMs")
 
-        // Capture prior state before making changes
-        aapsLogger.info(LTag.UI, "XXXX activate() calling capturePriorState()")
-        val priorState = try {
-            capturePriorState(scene)
+        // Capture pre-activation SMB flag (the only "truly prior" state) before making changes.
+        aapsLogger.info(LTag.UI, "XXXX activate() calling capturePriorSmb()")
+        val priorSmb = try {
+            capturePriorSmb(scene)
         } catch (e: Throwable) {
-            aapsLogger.error(LTag.UI, "XXXX activate() capturePriorState FAILED", e)
+            aapsLogger.error(LTag.UI, "XXXX activate() capturePriorSmb FAILED", e)
             throw e
         }
-        aapsLogger.info(LTag.UI, "XXXX activate() capturePriorState() returned: $priorState")
+        aapsLogger.info(LTag.UI, "XXXX activate() capturePriorSmb() returned: $priorSmb")
 
         // Execute each action
         val actionResults = mutableListOf<SceneExecutionResult.ActionResult>()
@@ -110,27 +110,21 @@ class SceneExecutor @Inject constructor(
             actionResults.add(result)
         }
 
-        // Record IDs of what we just created (pulled from insert results for override detection at revert time)
-        aapsLogger.info(LTag.UI, "XXXX activate() computing updatedPriorState")
-        val updatedPriorState = try {
-            priorState.copy(
-                sceneTtId = actionResults.firstOrNull { it.action is SceneAction.TempTarget }?.recordId,
-                scenePsId = actionResults.firstOrNull { it.action is SceneAction.ProfileSwitch }?.recordId,
-                sceneRunningModeId = actionResults.firstOrNull { it.action is SceneAction.LoopModeChange }?.recordId,
-                sceneTherapyEventId = actionResults.firstOrNull { it.action is SceneAction.CarePortalEvent }?.recordId
-            )
-        } catch (e: Throwable) {
-            aapsLogger.error(LTag.UI, "XXXX activate() updatedPriorState FAILED", e)
-            throw e
-        }
-        aapsLogger.info(LTag.UI, "XXXX activate() updatedPriorState computed")
+        // Capture record IDs of what we just created — used for chip detection and to spot manual
+        // overrides at revert time. NS ids fill in asynchronously as records get uploaded.
+        val scopedRecords = ActiveSceneState.ScopedRecords(
+            ttId = actionResults.firstOrNull { it.action is SceneAction.TempTarget }?.recordId,
+            psId = actionResults.firstOrNull { it.action is SceneAction.ProfileSwitch }?.recordId,
+            rmId = actionResults.firstOrNull { it.action is SceneAction.LoopModeChange }?.recordId,
+            teId = actionResults.firstOrNull { it.action is SceneAction.CarePortalEvent }?.recordId
+        )
 
-        // Set active state (with record IDs for override detection)
         val activeState = ActiveSceneState(
             scene = scene,
             activatedAt = now,
             durationMs = durationMs,
-            priorState = updatedPriorState
+            priorSmb = priorSmb,
+            scopedRecords = scopedRecords
         )
         aapsLogger.info(LTag.UI, "XXXX activate() setting active state for '${scene.name}'")
         activeSceneManager.setActive(activeState)
@@ -175,7 +169,7 @@ class SceneExecutor @Inject constructor(
 
         // Revert each action type based on prior state
         for (action in activeState.scene.actions) {
-            val result = revertAction(action, activeState.priorState, now)
+            val result = revertAction(action, activeState, now)
             actionResults.add(result)
         }
 
@@ -219,7 +213,7 @@ class SceneExecutor @Inject constructor(
         for (action in activeState.scene.actions) {
             if (action is SceneAction.SmbToggle) {
                 aapsLogger.info(LTag.UI, "XXXX onExpiry() reverting SmbToggle")
-                revertAction(action, activeState.priorState, now)
+                revertAction(action, activeState, now)
             }
         }
 
@@ -243,14 +237,13 @@ class SceneExecutor @Inject constructor(
         activeSceneManager.clearActive()
     }
 
-    private fun capturePriorState(scene: Scene): ActiveSceneState.PriorState {
+    private fun capturePriorSmb(scene: Scene): Boolean? {
         // SMB is the only action without a duration model — capture its prior value so revert
         // can restore the user's preference. TT/PS/RM revert by shortening their own record;
         // the resolver picks up whatever was underneath, so no snapshot is needed for them.
-        val smbEnabled = scene.actions.firstOrNull { it is SceneAction.SmbToggle }?.let {
+        return scene.actions.firstOrNull { it is SceneAction.SmbToggle }?.let {
             preferences.get(BooleanKey.ApsUseSmb)
         }
-        return ActiveSceneState.PriorState(smbEnabled = smbEnabled)
     }
 
     private suspend fun executeAction(
@@ -367,15 +360,16 @@ class SceneExecutor @Inject constructor(
 
     private suspend fun revertAction(
         action: SceneAction,
-        priorState: ActiveSceneState.PriorState,
+        state: ActiveSceneState,
         now: Long
     ): SceneExecutionResult.ActionResult {
+        val scoped = state.scopedRecords
         return try {
             when (action) {
                 is SceneAction.TempTarget      -> {
                     // Check if scene's TT is still active (not manually overridden)
                     val currentTt = persistenceLayer.getTemporaryTargetActiveAt(now)
-                    if (priorState.sceneTtId != null && currentTt?.id == priorState.sceneTtId) {
+                    if (scoped.ttId != null && currentTt?.id == scoped.ttId) {
                         persistenceLayer.cancelCurrentTemporaryTargetIfAny(
                             timestamp = now,
                             action = Action.CANCEL_TT,
@@ -395,12 +389,12 @@ class SceneExecutor @Inject constructor(
                     // Override-protection: if the active EPS no longer derives from the scene's
                     // PS, the user changed profile during the scene — leave their choice alone.
                     val currentEps = persistenceLayer.getEffectiveProfileSwitchActiveAt(now)
-                    val profileStillFromScene = priorState.scenePsId != null &&
-                        currentEps?.originalPsId == priorState.scenePsId
+                    val profileStillFromScene = scoped.psId != null &&
+                        currentEps?.originalPsId == scoped.psId
 
                     if (profileStillFromScene) {
                         persistenceLayer.cancelProfileSwitch(
-                            id = priorState.scenePsId!!,
+                            id = scoped.psId!!,
                             timestamp = now,
                             action = Action.PROFILE_SWITCH,
                             source = Sources.Scene,
@@ -415,16 +409,16 @@ class SceneExecutor @Inject constructor(
                 }
 
                 is SceneAction.SmbToggle       -> {
-                    priorState.smbEnabled?.let { preferences.put(BooleanKey.ApsUseSmb, it) }
+                    state.priorSmb?.let { preferences.put(BooleanKey.ApsUseSmb, it) }
                     SceneExecutionResult.ActionResult(action, success = true)
                 }
 
                 is SceneAction.LoopModeChange  -> {
                     // Check if scene's running mode is still active (not manually overridden)
                     val currentRm = persistenceLayer.getRunningModeActiveAt(now)
-                    if (priorState.sceneRunningModeId != null && currentRm.id == priorState.sceneRunningModeId) {
+                    if (scoped.rmId != null && currentRm.id == scoped.rmId) {
                         persistenceLayer.cancelRunningMode(
-                            id = priorState.sceneRunningModeId!!,
+                            id = scoped.rmId!!,
                             timestamp = now,
                             action = Action.RUNNING_MODE,
                             source = Sources.Scene,
@@ -448,7 +442,7 @@ class SceneExecutor @Inject constructor(
                     // catch invalidations. Edit-during-scene of the TE's duration is a known
                     // minor gap — deemed acceptable since CarePortal events are stamps, not
                     // typically edited mid-scene.
-                    priorState.sceneTherapyEventId?.let { teId ->
+                    scoped.teId?.let { teId ->
                         persistenceLayer.cancelTherapyEvent(
                             id = teId,
                             timestamp = now,
