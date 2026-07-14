@@ -55,7 +55,6 @@
     <string name="carelevo_state_connected_value">Connected</string>
 
     <string name="carelevo_overview_connect_btn_label">Activate Patch</string>
-    <string name="carelevo_overview_communication_btn_label">Communication Check</string>
     <string name="carelevo_overview_pump_discard_btn_label">Discard Patch</string>
 
     <string name="patch_prepare_dialog_title_insulin_amount">Select filled amount.</string>
@@ -150,16 +149,13 @@
     <string name="carelevo_toast_msg_needle_check_failed">Needle check failed.</string>
 
     <!-- Patch Discard -->
-    <string name="carelevo_toast_msg_discard_complete">Patch use completed.</string>
     <string name="carelevo_toast_msg_discard_failed">Patch discard failed. Please try again.</string>
 
     <!-- Basal Delivery -->
     <string name="carelevo_toast_msg_set_basal_failed">Basal delivery request failed. Please try again.</string>
 
     <!-- Delivery Resume/Suspend -->
-    <string name="carelevo_toast_mag_set_basal_resume_success">Delivery resumed successfully.</string>
     <string name="carelevo_toast_mag_set_basal_resume_fail">Failed to resume delivery. Please try again.</string>
-    <string name="carelevo_toast_mag_set_basal_suspend_success">Delivery suspended successfully.</string>
     <string name="carelevo_toast_mag_set_basal_suspend_fail">Failed to suspend delivery. Please try again.</string>
 
     <!-- Safety Check -->

@@ -17,8 +17,6 @@ import app.aaps.pump.carelevo.domain.usecase.patch.CarelevoPatchInfoMonitorUseCa
 import app.aaps.pump.carelevo.domain.usecase.patch.CarelevoPatchRptInfusionInfoProcessUseCase
 import app.aaps.pump.carelevo.domain.usecase.patch.CarelevoRequestPatchInfusionInfoUseCase
 import app.aaps.pump.carelevo.domain.usecase.userSetting.CarelevoCreateUserSettingInfoUseCase
-import app.aaps.pump.carelevo.domain.usecase.userSetting.CarelevoUpdateLowInsulinNoticeAmountUseCase
-import app.aaps.pump.carelevo.domain.usecase.userSetting.CarelevoUpdateMaxBolusDoseUseCase
 import app.aaps.pump.carelevo.domain.usecase.userSetting.CarelevoUserSettingInfoMonitorUseCase
 import dagger.Module
 import dagger.Provides
@@ -62,8 +60,6 @@ class CarelevoManagerModule {
         carelevoPatchInfoMonitorUseCase: CarelevoPatchInfoMonitorUseCase,
         carelevoUserSettingInfoMonitorUseCase: CarelevoUserSettingInfoMonitorUseCase,
         carelevoPatchRptInfusionInfoProcessUseCase: CarelevoPatchRptInfusionInfoProcessUseCase,
-        carelevoUpdateMaxBolusDoseUseCase: CarelevoUpdateMaxBolusDoseUseCase,
-        carelevoUpdateLowInfusionNoticeAmountUseCase: CarelevoUpdateLowInsulinNoticeAmountUseCase,
         carelevoCreateUserSettingInfoUserCase: CarelevoCreateUserSettingInfoUseCase,
         carelevoAlarmInfoUseCase: CarelevoAlarmInfoUseCase,
         requestPatchInfusionInfoUseCase: CarelevoRequestPatchInfusionInfoUseCase
@@ -80,8 +76,6 @@ class CarelevoManagerModule {
             carelevoPatchInfoMonitorUseCase,
             carelevoUserSettingInfoMonitorUseCase,
             carelevoPatchRptInfusionInfoProcessUseCase,
-            carelevoUpdateMaxBolusDoseUseCase,
-            carelevoUpdateLowInfusionNoticeAmountUseCase,
             carelevoCreateUserSettingInfoUserCase,
             carelevoAlarmInfoUseCase,
             requestPatchInfusionInfoUseCase

@@ -22,7 +22,6 @@ import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.ui.compose.pump.ProfileGateStepHost
 import app.aaps.core.ui.compose.siteRotation.BodyType
 import app.aaps.core.ui.compose.siteRotation.SiteLocationStepHost
-import app.aaps.pump.carelevo.ble.core.CarelevoBleController
 import app.aaps.pump.carelevo.command.CmdDiscard
 import app.aaps.pump.carelevo.common.CarelevoPatch
 import app.aaps.pump.carelevo.common.MutableEventFlow
@@ -55,7 +54,6 @@ class CarelevoPatchConnectionFlowViewModel @Inject constructor(
     private val aapsLogger: AAPSLogger,
     private val aapsSchedulers: AapsSchedulers,
     private val carelevoPatch: CarelevoPatch,
-    private val bleController: CarelevoBleController,
     private val commandQueue: CommandQueue,
     private val patchObserver: CarelevoPatchObserver,
     private val patchForceDiscardUseCase: CarelevoPatchForceDiscardUseCase,
@@ -269,8 +267,7 @@ class CarelevoPatchConnectionFlowViewModel @Inject constructor(
                 viewModelScope.launch {
                     val result = commandQueue.customCommand(CmdDiscard())
                     if (result.success) {
-                        bleController.unBondDevice()
-                        carelevoPatch.releasePatch()
+                        // unBond + releasePatch now run inside CmdDiscard on the queue thread
                         setUiState(UiState.Idle)
                         triggerEvent(CarelevoConnectEvent.DiscardComplete)
                     } else {
@@ -297,8 +294,7 @@ class CarelevoPatchConnectionFlowViewModel @Inject constructor(
                 when (response) {
                     is ResponseResult.Success -> {
                         aapsLogger.debug(LTag.PUMPCOMM, "response success")
-                        bleController.unBondDevice()
-                        carelevoPatch.releasePatch()
+                        carelevoPatch.discardTeardown()
                         setUiState(UiState.Idle)
                         triggerEvent(CarelevoConnectEvent.DiscardComplete)
                     }

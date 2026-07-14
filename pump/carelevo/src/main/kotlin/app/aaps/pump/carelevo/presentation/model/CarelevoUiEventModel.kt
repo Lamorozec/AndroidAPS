@@ -9,11 +9,8 @@ sealed class CarelevoOverviewEvent : Event {
     data object NoAction : CarelevoOverviewEvent()
     data object ShowMessageBluetoothNotEnabled : CarelevoOverviewEvent()
     data object ShowMessageCarelevoIsNotConnected : CarelevoOverviewEvent()
-    data object DiscardComplete : CarelevoOverviewEvent()
     data object DiscardFailed : CarelevoOverviewEvent()
-    data object ResumePumpComplete : CarelevoOverviewEvent()
     data object ResumePumpFailed : CarelevoOverviewEvent()
-    data object StopPumpComplete : CarelevoOverviewEvent()
     data object StopPumpFailed : CarelevoOverviewEvent()
 
     data object ClickPumpStopResumeBtn : CarelevoOverviewEvent()
@@ -22,7 +19,6 @@ sealed class CarelevoOverviewEvent : Event {
 
     // Action requests emitted from PumpAction.onClick (handled by the screen)
     data object StartConnectionFlow : CarelevoOverviewEvent()
-    data object StartCommunicationCheck : CarelevoOverviewEvent()
     data object ShowPumpDiscardDialog : CarelevoOverviewEvent()
 }
 
@@ -78,18 +74,6 @@ sealed class CarelevoConnectNeedleEvent : Event {
     data object DiscardFailed : CarelevoConnectNeedleEvent()
     data object SetBasalComplete : CarelevoConnectNeedleEvent()
     data object SetBasalFailed : CarelevoConnectNeedleEvent()
-}
-
-sealed class CarelevoCommunicationCheckEvent : Event {
-
-    data object NoAction : CarelevoCommunicationCheckEvent()
-    data object ShowMessageBluetoothNotEnabled : CarelevoCommunicationCheckEvent()
-    data object ShowMessagePatchAddressInvalid : CarelevoCommunicationCheckEvent()
-    data object CommunicationCheckComplete : CarelevoCommunicationCheckEvent()
-    data object CommunicationCheckFailed : CarelevoCommunicationCheckEvent()
-    data object DiscardComplete : CarelevoCommunicationCheckEvent()
-    data object DiscardFailed : CarelevoCommunicationCheckEvent()
-
 }
 
 sealed class AlarmEvent : Event {

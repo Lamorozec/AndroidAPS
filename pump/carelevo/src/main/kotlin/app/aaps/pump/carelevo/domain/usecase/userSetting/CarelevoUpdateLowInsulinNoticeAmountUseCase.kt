@@ -45,24 +45,32 @@ class CarelevoUpdateLowInsulinNoticeAmountUseCase @Inject constructor(
                 when (request.patchState) {
                     is PatchState.ConnectedBooted -> {
                         aapsLogger.debug(LTag.PUMPCOMM, "case1 connected requestPatchAndLocalUpdate")
-                        patchRepository.requestSetThresholdNotice(SetThresholdNoticeRequest(request.lowInsulinNoticeAmount, 0))
-                            .blockingGet()
-                            .takeIf { it is RequestResult.Pending }
-                            ?: throw IllegalStateException("request update low insulin notice amount is not pending")
+                        val pushed = runCatching {
+                            patchRepository.requestSetThresholdNotice(SetThresholdNoticeRequest(request.lowInsulinNoticeAmount, 0))
+                                .blockingGet()
+                                .takeIf { it is RequestResult.Pending }
+                                ?: throw IllegalStateException("request update low insulin notice amount is not pending")
 
-                        val requestResult = patchObserver.patchEvent
-                            .ofType<SetThresholdNoticeResultModel>()
-                            .blockingFirst()
-
-                        if (requestResult.result != Result.SUCCESS) {
-                            throw IllegalStateException("request update low insulin notice amount result is failed")
+                            patchObserver.patchEvent
+                                .ofType<SetThresholdNoticeResultModel>()
+                                .blockingFirst()
+                                .result == Result.SUCCESS
+                        }.getOrElse {
+                            aapsLogger.error(LTag.PUMPCOMM, "case1 push failed → defer for reconnect retry", it)
+                            false
                         }
 
+                        // Persist the desired value regardless; if the patch did not confirm, keep
+                        // needLowInsulinNoticeAmountSyncPatch=true so the deferred-sync re-pushes on the next
+                        // reconnect (mirrors case3) — closes the fail/timeout-while-connected gap.
                         val updateUserSettingInfoResult = userSettingInfoRepository.updateUserSettingInfo(
-                            userSettingInfo.copy(updatedAt = DateTime.now(), lowInsulinNoticeAmount = request.lowInsulinNoticeAmount, needLowInsulinNoticeAmountSyncPatch = false)
+                            userSettingInfo.copy(updatedAt = DateTime.now(), lowInsulinNoticeAmount = request.lowInsulinNoticeAmount, needLowInsulinNoticeAmountSyncPatch = !pushed)
                         )
                         if (!updateUserSettingInfoResult) {
                             throw IllegalStateException("update user setting info is failed")
+                        }
+                        if (!pushed) {
+                            throw IllegalStateException("request update low insulin notice amount result is failed")
                         }
                     }
 

@@ -23,6 +23,4 @@ interface CarelevoBleController {
     fun pend(command: BleCommand): CommandResult<Boolean>
     fun execute(command: BleCommand): Single<CommandResult<Boolean>>
     fun stop(): Boolean
-
-    fun isConnectedNow(address: String): Boolean
 }

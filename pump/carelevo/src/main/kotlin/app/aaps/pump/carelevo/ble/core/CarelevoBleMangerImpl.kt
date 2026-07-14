@@ -85,7 +85,6 @@ class CarelevoBleMangerImpl @Inject constructor(
     }.build()
 
     private var tempAddress: String? = null
-    private var disconnectedAddress: String? = null
 
     @Volatile
     private var isConnectingGatt = false
@@ -149,8 +148,11 @@ class CarelevoBleMangerImpl @Inject constructor(
         }
     }
 
+    // Internal short-circuit for connect(): if the link to this address is already fully up, skip the
+    // GATT redial. Not part of the manager interface (no external caller) since the queue reads readiness
+    // via CarelevoConnectionCoordinator.isConnected() / btState instead.
     @SuppressLint("MissingPermission")
-    override fun isConnected(macAddress: String): Boolean {
+    private fun isConnected(macAddress: String): Boolean {
         if (!checkPermissions()) return false
         if (!isBluetoothEnabled()) return false
 
@@ -347,8 +349,9 @@ class CarelevoBleMangerImpl @Inject constructor(
             commandScope.async {
                 bluetoothGatt = device.connectGatt(
                     context.applicationContext,
-//                    false,
-                    true,
+                    // autoConnect=false: connect on demand for the queue-owned lifecycle; do NOT let the
+                    // OS re-dial in the background after a deliberate disconnect.
+                    false,
                     bluetoothGattCallback,
                     BluetoothDevice.TRANSPORT_LE
                 )
@@ -458,14 +461,8 @@ class CarelevoBleMangerImpl @Inject constructor(
         val bleState = CarelevoBleSource.bluetoothState.value
 
         if (bleState?.isServiceDiscovered != ServiceDiscoverState.DISCOVER_STATE_DISCOVERED) {
+            // No background reconnect here — the CommandQueue reconnects before executing a command.
             clearGatt()
-            disconnectedAddress?.let { address ->
-                stateScope.launch {
-                    delay(2_000L)
-                    aapsLogger.debug(LTag.PUMPBTCOMM, "writeCharacteristic.reconnect address=$address")
-                    connectTo(address)
-                }
-            }
             return CommandResult.Failure(FailureState.FAILURE_RESOURCE_NOT_INITIALIZED, "bluetooth adapter is not initialized")
         }
 
@@ -808,7 +805,6 @@ class CarelevoBleMangerImpl @Inject constructor(
 
                 BluetoothProfile.STATE_DISCONNECTED  -> {
                     aapsLogger.debug(LTag.PUMPBTCOMM, "onConnectionStateChange.disconnected status=$status")
-                    disconnectedAddress = gatt?.device?.address
                     isConnectingGatt = false
                     when (status) {
                         BluetoothGatt.GATT_SUCCESS -> {
@@ -839,12 +835,8 @@ class CarelevoBleMangerImpl @Inject constructor(
                             )
 
                             CarelevoBleSource._bluetoothState.onNext(nextState)
-                            disconnectedAddress?.let { address ->
-                                stateScope.launch {
-                                    delay(2_000L)
-                                    connectTo(address)
-                                }
-                            }
+                            // No background reconnect on status 22 (local-host terminate = what a
+                            // deliberate disconnect() produces) — the CommandQueue owns reconnection.
                         }
 
                         else                       -> {
@@ -960,7 +952,7 @@ class CarelevoBleMangerImpl @Inject constructor(
     }
 
     @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
-    fun dumpBleConnectionState(macAddress: String): String {
+    private fun dumpBleConnectionState(macAddress: String): String {
         val sb = StringBuilder()
 
         // 1. Bluetooth ON
@@ -1008,19 +1000,4 @@ class CarelevoBleMangerImpl @Inject constructor(
         return sb.toString()
     }
 
-    @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
-    fun forceBleResetAndReconnect(address: String) {
-        bluetoothGatt?.disconnect()
-        bluetoothGatt?.refresh()
-        bluetoothGatt?.close()
-        bluetoothGatt = null
-
-        isConnectingGatt = false
-        CarelevoBleSource._bluetoothState.onNext(defaultBleState())
-
-        stateScope.launch {
-            delay(1000)
-            connectTo(address)
-        }
-    }
 }

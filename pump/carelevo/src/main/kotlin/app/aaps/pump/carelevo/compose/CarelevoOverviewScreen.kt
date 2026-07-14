@@ -72,11 +72,8 @@ fun CarelevoOverviewScreen(
     )
     val bluetoothNotEnabledMessage = stringResource(R.string.carelevo_toast_msg_bluetooth_not_enabled)
     val notConnectedMessage = stringResource(R.string.carelevo_toast_msg_patch_not_connected)
-    val discardCompleteMessage = stringResource(R.string.carelevo_toast_msg_discard_complete)
     val discardFailedMessage = stringResource(R.string.carelevo_toast_msg_discard_failed)
-    val resumeSuccessMessage = stringResource(R.string.carelevo_toast_mag_set_basal_resume_success)
     val resumeFailedMessage = stringResource(R.string.carelevo_toast_mag_set_basal_resume_fail)
-    val suspendSuccessMessage = stringResource(R.string.carelevo_toast_mag_set_basal_suspend_success)
     val suspendFailedMessage = stringResource(R.string.carelevo_toast_mag_set_basal_suspend_fail)
     val isActionLoading = actionState is UiState.Loading
 
@@ -85,7 +82,6 @@ fun CarelevoOverviewScreen(
             viewModel.observePatchInfo()
             viewModel.observePatchState()
             viewModel.observeInfusionInfo()
-            viewModel.observeBleState()
             viewModel.observeProfile()
             viewModel.setIsCreated(true)
         }
@@ -95,21 +91,17 @@ fun CarelevoOverviewScreen(
     LaunchedEffect(viewModel) {
         viewModel.event.collect { event ->
             when (event) {
-                CarelevoOverviewEvent.ShowMessageBluetoothNotEnabled    -> snackbarHostState.showSnackbar(bluetoothNotEnabledMessage)
+                CarelevoOverviewEvent.ShowMessageBluetoothNotEnabled -> snackbarHostState.showSnackbar(bluetoothNotEnabledMessage)
                 CarelevoOverviewEvent.ShowMessageCarelevoIsNotConnected -> snackbarHostState.showSnackbar(notConnectedMessage)
-                CarelevoOverviewEvent.DiscardComplete                   -> snackbarHostState.showSnackbar(discardCompleteMessage)
-                CarelevoOverviewEvent.DiscardFailed                     -> snackbarHostState.showSnackbar(discardFailedMessage)
-                CarelevoOverviewEvent.ResumePumpComplete                -> snackbarHostState.showSnackbar(resumeSuccessMessage)
-                CarelevoOverviewEvent.ResumePumpFailed                  -> snackbarHostState.showSnackbar(resumeFailedMessage)
-                CarelevoOverviewEvent.StopPumpComplete                  -> snackbarHostState.showSnackbar(suspendSuccessMessage)
-                CarelevoOverviewEvent.StopPumpFailed                    -> snackbarHostState.showSnackbar(suspendFailedMessage)
-                CarelevoOverviewEvent.ShowPumpResumeDialog              -> showResumeDialog = true
-                CarelevoOverviewEvent.ShowPumpStopDurationSelectDialog  -> showSuspendTimePicker = true
-                CarelevoOverviewEvent.StartConnectionFlow               -> onStartWorkflow(CarelevoScreenType.CONNECTION_FLOW_START)
-                CarelevoOverviewEvent.StartCommunicationCheck           -> onStartWorkflow(CarelevoScreenType.COMMUNICATION_CHECK)
-                CarelevoOverviewEvent.ShowPumpDiscardDialog             -> showDiscardDialog = true
+                CarelevoOverviewEvent.DiscardFailed -> snackbarHostState.showSnackbar(discardFailedMessage)
+                CarelevoOverviewEvent.ResumePumpFailed -> snackbarHostState.showSnackbar(resumeFailedMessage)
+                CarelevoOverviewEvent.StopPumpFailed -> snackbarHostState.showSnackbar(suspendFailedMessage)
+                CarelevoOverviewEvent.ShowPumpResumeDialog -> showResumeDialog = true
+                CarelevoOverviewEvent.ShowPumpStopDurationSelectDialog -> showSuspendTimePicker = true
+                CarelevoOverviewEvent.StartConnectionFlow -> onStartWorkflow(CarelevoScreenType.CONNECTION_FLOW_START)
+                CarelevoOverviewEvent.ShowPumpDiscardDialog -> showDiscardDialog = true
                 CarelevoOverviewEvent.ClickPumpStopResumeBtn,
-                CarelevoOverviewEvent.NoAction                          -> Unit
+                CarelevoOverviewEvent.NoAction -> Unit
             }
         }
     }

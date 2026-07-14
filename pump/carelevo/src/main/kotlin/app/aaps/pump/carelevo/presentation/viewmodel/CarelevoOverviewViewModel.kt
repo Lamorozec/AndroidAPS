@@ -20,7 +20,6 @@ import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.rx.AapsSchedulers
 import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.utils.DateUtil
-import app.aaps.core.ui.R as CoreUiR
 import app.aaps.core.ui.compose.StatusLevel
 import app.aaps.core.ui.compose.icons.IcLoopPaused
 import app.aaps.core.ui.compose.pump.ActionCategory
@@ -31,9 +30,9 @@ import app.aaps.core.ui.compose.pump.PumpOverviewUiState
 import app.aaps.core.ui.compose.pump.StatusBanner
 import app.aaps.core.ui.compose.pump.tickerFlow
 import app.aaps.pump.carelevo.R
-import app.aaps.pump.carelevo.ble.core.CarelevoBleController
-import app.aaps.pump.carelevo.ble.data.DeviceModuleState
 import app.aaps.pump.carelevo.command.CmdDiscard
+import app.aaps.pump.carelevo.command.CmdPumpResume
+import app.aaps.pump.carelevo.command.CmdPumpStop
 import app.aaps.pump.carelevo.common.CarelevoPatch
 import app.aaps.pump.carelevo.common.MutableEventFlow
 import app.aaps.pump.carelevo.common.asEventFlow
@@ -45,12 +44,8 @@ import app.aaps.pump.carelevo.domain.model.ResponseResult
 import app.aaps.pump.carelevo.domain.model.infusion.CarelevoInfusionInfoDomainModel
 import app.aaps.pump.carelevo.domain.model.patch.CarelevoPatchInfoDomainModel
 import app.aaps.pump.carelevo.domain.usecase.infusion.CarelevoDeleteInfusionInfoUseCase
-import app.aaps.pump.carelevo.domain.usecase.infusion.CarelevoPumpResumeUseCase
-import app.aaps.pump.carelevo.domain.usecase.infusion.CarelevoPumpStopUseCase
 import app.aaps.pump.carelevo.domain.usecase.infusion.model.CarelevoDeleteInfusionRequestModel
-import app.aaps.pump.carelevo.domain.usecase.infusion.model.CarelevoPumpStopRequestModel
 import app.aaps.pump.carelevo.domain.usecase.patch.CarelevoPatchForceDiscardUseCase
-import app.aaps.pump.carelevo.domain.usecase.patch.CarelevoRequestPatchInfusionInfoUseCase
 import app.aaps.pump.carelevo.presentation.model.CarelevoOverviewEvent
 import app.aaps.pump.carelevo.presentation.model.CarelevoOverviewUiModel
 import app.aaps.pump.carelevo.presentation.type.CarelevoScreenType
@@ -83,6 +78,7 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import kotlin.jvm.optionals.getOrNull
+import app.aaps.core.ui.R as CoreUiR
 
 @HiltViewModel
 class CarelevoOverviewViewModel @Inject constructor(
@@ -92,19 +88,12 @@ class CarelevoOverviewViewModel @Inject constructor(
     private val commandQueue: CommandQueue,
     private val aapsLogger: AAPSLogger,
     private val carelevoPatch: CarelevoPatch,
-    private val bleController: CarelevoBleController,
     private val aapsSchedulers: AapsSchedulers,
     private val patchForceDiscardUseCase: CarelevoPatchForceDiscardUseCase,
-    private val pumpStopUseCase: CarelevoPumpStopUseCase,
-    private val pumpResumeUseCase: CarelevoPumpResumeUseCase,
-    private val requestPatchInfusionInfoUseCase: CarelevoRequestPatchInfusionInfoUseCase,
     private val carelevoDeleteInfusionInfoUseCase: CarelevoDeleteInfusionInfoUseCase,
     private val rxBus: RxBus,
     @ApplicationContext private val context: Context
 ) : ViewModel() {
-
-    private val _bluetoothState = MutableLiveData<DeviceModuleState?>()
-    val bluetoothState: LiveData<DeviceModuleState?> get() = _bluetoothState
 
     private val _patchState = MutableLiveData<PatchState>(PatchState.NotConnectedNotBooting)
     val patchState: LiveData<PatchState?> get() = _patchState
@@ -145,7 +134,6 @@ class CarelevoOverviewViewModel @Inject constructor(
     private val _uiState: MutableStateFlow<State> = MutableStateFlow(UiState.Idle)
     val uiState = _uiState.asStateFlow()
 
-    private val _bluetoothStateFlow = MutableStateFlow<DeviceModuleState?>(null)
     private val _patchStateFlow = MutableStateFlow<PatchState>(PatchState.NotConnectedNotBooting)
     private val _overviewDataFlow = MutableStateFlow(defaultOverviewData())
     private val _basalRateFlow = MutableStateFlow(0.0)
@@ -154,14 +142,12 @@ class CarelevoOverviewViewModel @Inject constructor(
     private val communicationStatus = PumpCommunicationStatus(rxBus, commandQueue, context, viewModelScope)
 
     private val overviewInputs = combine(
-        _bluetoothStateFlow,
         _patchStateFlow,
         _overviewDataFlow,
         _basalRateFlow,
         _tempBasalRateFlow
-    ) { bluetoothState, patchState, overviewData, basalRate, tempBasalRate ->
+    ) { patchState, overviewData, basalRate, tempBasalRate ->
         OverviewInputs(
-            bluetoothState = bluetoothState,
             patchState = patchState,
             overviewData = overviewData,
             basalRate = basalRate,
@@ -175,7 +161,6 @@ class CarelevoOverviewViewModel @Inject constructor(
         tickerFlow(30_000L)
     ) { inputs, _, _ ->
         buildOverviewState(
-            bluetoothState = inputs.bluetoothState,
             patchState = inputs.patchState,
             overviewData = inputs.overviewData,
             basalRate = inputs.basalRate,
@@ -185,7 +170,6 @@ class CarelevoOverviewViewModel @Inject constructor(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000L),
         initialValue = buildOverviewState(
-            bluetoothState = _bluetoothStateFlow.value,
             patchState = _patchStateFlow.value,
             overviewData = _overviewDataFlow.value,
             basalRate = _basalRateFlow.value,
@@ -222,17 +206,6 @@ class CarelevoOverviewViewModel @Inject constructor(
 
     fun setIsCreated(isCreated: Boolean) {
         _isCreated = isCreated
-    }
-
-    fun observeBleState() {
-        compositeDisposable += carelevoPatch.btState
-            .observeOn(aapsSchedulers.main)
-            .subscribe { btState ->
-                val btState = btState.getOrNull() ?: return@subscribe
-                aapsLogger.debug("[observeBleState] btState: ${btState.isEnabled}")
-                _bluetoothState.value = btState.isEnabled
-                _bluetoothStateFlow.value = btState.isEnabled
-            }
     }
 
     fun observePatchInfo() {
@@ -447,14 +420,10 @@ class CarelevoOverviewViewModel @Inject constructor(
         return when (event) {
             is CarelevoOverviewEvent.ShowMessageBluetoothNotEnabled    -> event
             is CarelevoOverviewEvent.ShowMessageCarelevoIsNotConnected -> event
-            is CarelevoOverviewEvent.DiscardComplete                   -> event
             is CarelevoOverviewEvent.DiscardFailed                     -> event
-            is CarelevoOverviewEvent.ResumePumpComplete                -> event
             is CarelevoOverviewEvent.ResumePumpFailed                  -> event
-            is CarelevoOverviewEvent.StopPumpComplete                  -> event
             is CarelevoOverviewEvent.StopPumpFailed                    -> event
             is CarelevoOverviewEvent.StartConnectionFlow               -> event
-            is CarelevoOverviewEvent.StartCommunicationCheck           -> event
             is CarelevoOverviewEvent.ShowPumpDiscardDialog             -> event
 
             is CarelevoOverviewEvent.ClickPumpStopResumeBtn            -> {
@@ -490,9 +459,7 @@ class CarelevoOverviewViewModel @Inject constructor(
 
     fun startDiscardProcess() {
         when (carelevoPatch.patchState.value?.getOrNull()) {
-            is PatchState.NotConnectedNotBooting, null -> {
-                triggerEvent(CarelevoOverviewEvent.DiscardComplete)
-            }
+            is PatchState.NotConnectedNotBooting, null -> Unit // no active patch → nothing to discard
 
             else                                       -> {
                 // Route the BLE stop through the queue (reconnect-before-execute); if the patch can't
@@ -502,10 +469,8 @@ class CarelevoOverviewViewModel @Inject constructor(
                     val result = commandQueue.customCommand(CmdDiscard())
                     if (result.success) {
                         aapsLogger.debug(LTag.PUMPCOMM, "[startDiscard] success")
-                        bleController.unBondDevice()
-                        carelevoPatch.releasePatch()
+                        // unBond + releasePatch now run inside CmdDiscard on the queue thread
                         setUiState(UiState.Idle)
-                        triggerEvent(CarelevoOverviewEvent.DiscardComplete)
                     } else {
                         aapsLogger.error(LTag.PUMPCOMM, "[startDiscard] failed, falling back to force-discard")
                         startPatchForceDiscard()
@@ -519,9 +484,7 @@ class CarelevoOverviewViewModel @Inject constructor(
         when (response) {
             is ResponseResult.Success -> {
                 aapsLogger.debug(LTag.PUMPCOMM, "[startPatchDiscard] success")
-                bleController.unBondDevice()
-                carelevoPatch.releasePatch()
-                triggerEvent(CarelevoOverviewEvent.DiscardComplete)
+                carelevoPatch.discardTeardown()
             }
 
             else                      -> {
@@ -555,10 +518,6 @@ class CarelevoOverviewViewModel @Inject constructor(
             triggerEvent(CarelevoOverviewEvent.ShowMessageBluetoothNotEnabled)
             return
         }
-        if (!carelevoPatch.isCarelevoConnected()) {
-            triggerEvent(CarelevoOverviewEvent.ShowMessageCarelevoIsNotConnected)
-            return
-        }
 
         setUiState(UiState.Loading)
 
@@ -581,42 +540,20 @@ class CarelevoOverviewViewModel @Inject constructor(
             aapsLogger.debug(LTag.PUMPCOMM, "[startPumpStopProcess] isTempBasalRunning=$cancelTempBasalResult, isExtendBolusRunning=$cancelExtendBolusResult, stopMinute: $stopMinute")
 
             if (cancelExtendBolusResult && cancelTempBasalResult) {
-                compositeDisposable += pumpStopUseCase.execute(CarelevoPumpStopRequestModel(durationMin = stopMinute))
-                    .timeout(3000L, TimeUnit.MILLISECONDS)
-                    .subscribeOn(aapsSchedulers.io)
-                    .observeOn(aapsSchedulers.main)
-                    .doOnError { e ->
-                        aapsLogger.debug(LTag.PUMPCOMM, "[startPumpStopProcess] doOnError: $e")
-                    }
-                    .doFinally {
-                        setUiState(UiState.Idle)
-                    }
-                    .subscribe(
-                        { response ->
-                            when (response) {
-                                is ResponseResult.Success -> {
-                                    handlePumpStopResponse(
-                                        isTempBasalRunning = isTempBasalRunning,
-                                        isExtendBolusRunning = isExtendBolusRunning,
-                                        stopMinute = stopMinute
-                                    )
-                                }
-
-                                is ResponseResult.Error   -> {
-                                    aapsLogger.debug(LTag.PUMPCOMM, "[startPumpStopProcess] response error: ${response.e}")
-                                    triggerEvent(CarelevoOverviewEvent.StopPumpFailed)
-                                }
-
-                                else                      -> {
-                                    aapsLogger.debug(LTag.PUMPCOMM, "[startPumpStopProcess] response failed/unknown")
-                                    triggerEvent(CarelevoOverviewEvent.StopPumpFailed)
-                                }
-                            }
-                        },
-                        { e ->
-                            aapsLogger.debug(LTag.PUMPCOMM, "[startPumpStopProcess] subscribe throwable: $e")
-                            triggerEvent(CarelevoOverviewEvent.StopPumpFailed)
-                        })
+                // Route the stop frame through the queue (connect-before-execute). The pre-cancel above
+                // already ran on the queue from this coroutine (safe — not the worker thread).
+                val result = commandQueue.customCommand(CmdPumpStop(stopMinute))
+                setUiState(UiState.Idle)
+                if (result.success) {
+                    handlePumpStopResponse(
+                        isTempBasalRunning = isTempBasalRunning,
+                        isExtendBolusRunning = isExtendBolusRunning,
+                        stopMinute = stopMinute
+                    )
+                } else {
+                    aapsLogger.debug(LTag.PUMPCOMM, "[startPumpStopProcess] stop failed")
+                    triggerEvent(CarelevoOverviewEvent.StopPumpFailed)
+                }
             } else {
                 aapsLogger.debug(LTag.PUMPCOMM, "[startPumpStopProcess] no active temp/extend bolus to cancel")
                 setUiState(UiState.Idle)
@@ -659,8 +596,6 @@ class CarelevoOverviewViewModel @Inject constructor(
                 isDeleteExtendBolus = isExtendBolusRunning
             )
         )
-
-        triggerEvent(CarelevoOverviewEvent.StopPumpComplete)
     }
 
     private suspend fun cancelTempBasal(): Boolean {
@@ -677,47 +612,23 @@ class CarelevoOverviewViewModel @Inject constructor(
             return
         }
 
-        if (!carelevoPatch.isCarelevoConnected()) {
-            triggerEvent(CarelevoOverviewEvent.ShowMessageCarelevoIsNotConnected)
-            return
-        }
-
         setUiState(UiState.Loading)
-        compositeDisposable += pumpResumeUseCase.execute()
-            .timeout(3000L, TimeUnit.MILLISECONDS)
-            .observeOn(aapsSchedulers.io)
-            .subscribeOn(aapsSchedulers.io)
-            .doOnError {
-                aapsLogger.debug(LTag.PUMPCOMM, "doOnError called : $it")
-                setUiState(UiState.Idle)
+        viewModelScope.launch {
+            // Route the resume frame through the queue (connect-before-execute).
+            val result = commandQueue.customCommand(CmdPumpResume())
+            setUiState(UiState.Idle)
+            if (result.success) {
+                pumpSync.syncStopTemporaryBasalWithPumpId(
+                    timestamp = dateUtil.now(),
+                    endPumpId = dateUtil.now(),
+                    pumpType = PumpType.CAREMEDI_CARELEVO,
+                    pumpSerial = carelevoPatch.patchInfo.value?.getOrNull()?.manufactureNumber ?: ""
+                )
+            } else {
+                aapsLogger.debug(LTag.PUMPCOMM, "[startPumpResume] resume failed")
                 triggerEvent(CarelevoOverviewEvent.ResumePumpFailed)
             }
-            .subscribe { response ->
-                when (response) {
-                    is ResponseResult.Success -> {
-                        aapsLogger.debug(LTag.PUMPCOMM, "response success")
-                        viewModelScope.launch {
-                            pumpSync.syncStopTemporaryBasalWithPumpId(
-                                timestamp = dateUtil.now(),
-                                endPumpId = dateUtil.now(),
-                                pumpType = PumpType.CAREMEDI_CARELEVO,
-                                pumpSerial = carelevoPatch.patchInfo.value?.getOrNull()?.manufactureNumber ?: ""
-                            )
-                        }
-
-                        setUiState(UiState.Idle)
-                        triggerEvent(CarelevoOverviewEvent.ResumePumpComplete)
-                    }
-
-                    is ResponseResult.Failure -> {}
-
-                    is ResponseResult.Error   -> {
-                        aapsLogger.debug(LTag.PUMPCOMM, "response failed: ${response.e.message}")
-                        setUiState(UiState.Idle)
-                        triggerEvent(CarelevoOverviewEvent.ResumePumpFailed)
-                    }
-                }
-            }
+        }
     }
 
     fun parseBootDateTime(raw: String?): LocalDateTime? {
@@ -773,49 +684,36 @@ class CarelevoOverviewViewModel @Inject constructor(
     )
 
     private fun buildOverviewState(
-        bluetoothState: DeviceModuleState?,
         patchState: PatchState?,
         overviewData: CarelevoOverviewUiModel,
         basalRate: Double,
         tempBasalRate: Double?
     ): PumpOverviewUiState {
-        // When connected+idle show no pump banner so the shared communication/queue status
-        // can surface (matches Medtrum/Equil); otherwise show the disconnected warning.
+        // A patch is activated (connected OR just idle-disconnected) → no warning banner; let the shared
+        // communication/queue status surface (matches Medtrum/Equil). Idle-disconnect is normal now that
+        // the queue owns the lifecycle and reconnects on demand; only "no active patch" is a real warning.
         val banner = when (patchState) {
-            PatchState.ConnectedBooted        -> null
-
             PatchState.NotConnectedNotBooting -> StatusBanner(
                 text = rh.gs(R.string.carelevo_state_none_value),
                 level = StatusLevel.WARNING
             )
 
-            else                              -> StatusBanner(
-                text = rh.gs(R.string.carelevo_state_disconnected_value),
-                level = StatusLevel.WARNING
-            )
+            else                              -> null
         } ?: communicationStatus.statusBanner()
 
         val infoRows = buildList {
             add(
                 PumpInfoRow(
                     label = rh.gs(R.string.carelevo_bluetooth_state_key),
-                    value = bluetoothLabel(bluetoothState)
+                    value = patchStateLabel(patchState)
                 )
             )
 
             when (patchState) {
-                PatchState.NotConnectedNotBooting -> Unit
-
-                PatchState.NotConnectedBooted     -> {
-                    add(
-                        PumpInfoRow(
-                            label = rh.gs(R.string.carelevo_serial_number_key),
-                            value = overviewData.serialNumber.ifBlank { "-" }
-                        )
-                    )
-                }
-
-                PatchState.ConnectedBooted        -> {
+                // Patch activated (connected or idle-disconnected) → show the full status. Idle-disconnect
+                // is normal; values are last-known and the queue reconnects on the next action.
+                PatchState.ConnectedBooted,
+                PatchState.NotConnectedBooted -> {
                     add(
                         PumpInfoRow(
                             label = rh.gs(R.string.carelevo_serial_number_key),
@@ -875,8 +773,7 @@ class CarelevoOverviewViewModel @Inject constructor(
                     )
                 }
 
-                null                              -> Unit
-                else                              -> Unit
+                else                          -> Unit
             }
         }
 
@@ -890,19 +787,12 @@ class CarelevoOverviewViewModel @Inject constructor(
                 )
             )
 
-            PatchState.NotConnectedBooted     -> listOf(
-                PumpAction(
-                    label = rh.gs(R.string.carelevo_overview_communication_btn_label),
-                    icon = Icons.Filled.SwapHoriz,
-                    category = ActionCategory.PRIMARY,
-                    onClick = { triggerEvent(CarelevoOverviewEvent.StartCommunicationCheck) }
-                )
-            )
-
             else                              -> emptyList()
         }
 
-        val managementActions = if (patchState == PatchState.ConnectedBooted) {
+        // Suspend/Discard are available whenever a patch is activated (connected or idle-disconnected);
+        // they reconnect-on-tap via the queue rather than being gated behind a live link.
+        val managementActions = if (patchState == PatchState.ConnectedBooted || patchState == PatchState.NotConnectedBooted) {
             listOf(
                 PumpAction(
                     label = rh.gs(R.string.carelevo_overview_pump_discard_btn_label),
@@ -940,12 +830,6 @@ class CarelevoOverviewViewModel @Inject constructor(
         else                              -> rh.gs(R.string.carelevo_state_disconnected_value)
     }
 
-    private fun bluetoothLabel(bluetoothState: DeviceModuleState?): String = when (bluetoothState) {
-        DeviceModuleState.DEVICE_STATE_ON  -> rh.gs(R.string.carelevo_state_connected_value)
-        DeviceModuleState.DEVICE_STATE_OFF -> rh.gs(R.string.carelevo_state_disconnected_value)
-        else                               -> "-"
-    }
-
     private fun formatRemainingMinutes(totalMinutes: Int): String {
         if (totalMinutes <= 0) return "-"
 
@@ -962,7 +846,6 @@ class CarelevoOverviewViewModel @Inject constructor(
     }
 
     private data class OverviewInputs(
-        val bluetoothState: DeviceModuleState?,
         val patchState: PatchState,
         val overviewData: CarelevoOverviewUiModel,
         val basalRate: Double,
@@ -998,15 +881,11 @@ class CarelevoOverviewViewModel @Inject constructor(
         if (!carelevoPatch.isBluetoothEnabled()) {
             return
         }
-        if (!carelevoPatch.isCarelevoConnected()) {
-            return
+        // Route through the queue: connect-before-read so an idle-disconnected patch reconnects,
+        // reads status, then the queue idle-disconnects — instead of no-op'ing when disconnected.
+        viewModelScope.launch {
+            commandQueue.readStatus("Carelevo overview refresh")
         }
-
-        compositeDisposable += requestPatchInfusionInfoUseCase.execute()
-            .observeOn(aapsSchedulers.main)
-            .subscribeOn(aapsSchedulers.io)
-            .timeout(3000L, TimeUnit.MILLISECONDS)
-            .subscribe()
     }
 
     override fun onCleared() {

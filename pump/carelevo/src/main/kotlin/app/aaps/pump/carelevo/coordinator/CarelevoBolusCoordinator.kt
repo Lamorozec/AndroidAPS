@@ -29,7 +29,6 @@ import app.aaps.pump.carelevo.domain.usecase.bolus.model.CancelBolusInfusionResp
 import app.aaps.pump.carelevo.domain.usecase.bolus.model.StartExtendBolusInfusionRequestModel
 import app.aaps.pump.carelevo.domain.usecase.bolus.model.StartImmeBolusInfusionRequestModel
 import app.aaps.pump.carelevo.domain.usecase.bolus.model.StartImmeBolusInfusionResponseModel
-import app.aaps.pump.carelevo.event.EventForceStopConnecting
 import io.reactivex.rxjava3.disposables.CompositeDisposable
 import io.reactivex.rxjava3.kotlin.plusAssign
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -40,7 +39,6 @@ import java.util.concurrent.TimeoutException
 import javax.inject.Inject
 import javax.inject.Provider
 import javax.inject.Singleton
-import kotlin.jvm.Volatile
 import kotlin.jvm.optionals.getOrNull
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -130,7 +128,6 @@ class CarelevoBolusCoordinator @Inject constructor(
                 .blockingGet()
         } catch (e: Throwable) {
             aapsLogger.error(LTag.PUMPCOMM, "deliverTreatment.exception error=$e")
-            rxBus.send(EventForceStopConnecting())
             result.success = false
             result.enacted = false
             result.bolusDelivered = 0.0

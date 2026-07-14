@@ -58,24 +58,32 @@ class CarelevoUpdateMaxBolusDoseUseCase @Inject constructor(
                     when (request.patchState) {
                         is PatchState.ConnectedBooted -> {
                             aapsLogger.debug(LTag.PUMPCOMM, "case2 connected requestPatchAndLocalUpdate")
-                            patchRepository.requestSetThresholdMaxDose(SetThresholdInfusionMaxDoseRequest(request.maxBolusDose))
-                                .blockingGet()
-                                .takeIf { it is RequestResult.Pending }
-                                ?: throw IllegalStateException("request update max bolus dose is not pending")
+                            val pushed = runCatching {
+                                patchRepository.requestSetThresholdMaxDose(SetThresholdInfusionMaxDoseRequest(request.maxBolusDose))
+                                    .blockingGet()
+                                    .takeIf { it is RequestResult.Pending }
+                                    ?: throw IllegalStateException("request update max bolus dose is not pending")
 
-                            val requestUpdateMaxBolusDoseResult = patchObserver.patchEvent
-                                .ofType<SetInfusionThresholdResultModel>()
-                                .blockingFirst()
-
-                            if (requestUpdateMaxBolusDoseResult.result != Result.SUCCESS) {
-                                throw IllegalStateException("request update max bolus dose result is failed")
+                                patchObserver.patchEvent
+                                    .ofType<SetInfusionThresholdResultModel>()
+                                    .blockingFirst()
+                                    .result == Result.SUCCESS
+                            }.getOrElse {
+                                aapsLogger.error(LTag.PUMPCOMM, "case2 push failed → defer for reconnect retry", it)
+                                false
                             }
 
+                            // Persist the desired value regardless; if the patch did not confirm, keep
+                            // needMaxBolusDoseSyncPatch=true so the deferred-sync re-pushes on the next
+                            // reconnect (mirrors case4) — closes the fail/timeout-while-connected gap.
                             val updateUserSettingInfoResult = userSettingInfoRepository.updateUserSettingInfo(
-                                userSettingInfo.copy(updatedAt = DateTime.now(), maxBolusDose = request.maxBolusDose, needMaxBolusDoseSyncPatch = false)
+                                userSettingInfo.copy(updatedAt = DateTime.now(), maxBolusDose = request.maxBolusDose, needMaxBolusDoseSyncPatch = !pushed)
                             )
                             if (!updateUserSettingInfoResult) {
                                 throw IllegalStateException("update user setting info is failed")
+                            }
+                            if (!pushed) {
+                                throw IllegalStateException("request update max bolus dose result is failed")
                             }
                         }
 

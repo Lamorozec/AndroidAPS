@@ -48,9 +48,14 @@ import app.aaps.pump.carelevo.ble.CarelevoBleSource
 import app.aaps.pump.carelevo.ble.data.BondingState.Companion.codeToBondingResult
 import app.aaps.pump.carelevo.ble.data.DeviceModuleState.Companion.codeToDeviceResult
 import app.aaps.pump.carelevo.ble.data.PeripheralConnectionState
+import app.aaps.pump.carelevo.command.CarelevoActivationExecutor
+import app.aaps.pump.carelevo.command.CmdTimeZoneUpdate
+import app.aaps.pump.carelevo.command.CmdUpdateBuzzer
+import app.aaps.pump.carelevo.command.CmdUpdateExpiredThreshold
+import app.aaps.pump.carelevo.command.CmdUpdateLowInsulinNotice
+import app.aaps.pump.carelevo.command.CmdUpdateMaxBolus
 import app.aaps.pump.carelevo.common.CarelevoAlarmNotifier
 import app.aaps.pump.carelevo.common.CarelevoObserveReceiver
-import app.aaps.pump.carelevo.command.CarelevoActivationExecutor
 import app.aaps.pump.carelevo.common.CarelevoPatch
 import app.aaps.pump.carelevo.common.keys.CarelevoBooleanPreferenceKey
 import app.aaps.pump.carelevo.common.keys.CarelevoIntPreferenceKey
@@ -63,9 +68,12 @@ import app.aaps.pump.carelevo.coordinator.CarelevoSettingsCoordinator
 import app.aaps.pump.carelevo.coordinator.CarelevoTempBasalCoordinator
 import app.aaps.pump.carelevo.data.protocol.parser.CarelevoProtocolParserRegister
 import app.aaps.pump.carelevo.domain.model.alarm.CarelevoAlarmInfo
+import app.aaps.pump.carelevo.domain.model.infusion.CarelevoInfusionInfoDomainModel
+import app.aaps.pump.carelevo.domain.model.userSetting.CarelevoUserSettingInfoDomainModel
 import app.aaps.pump.carelevo.domain.type.AlarmCause
 import app.aaps.pump.carelevo.domain.type.AlarmType.Companion.isCritical
 import io.reactivex.rxjava3.core.Completable
+import io.reactivex.rxjava3.core.Observable
 import io.reactivex.rxjava3.disposables.CompositeDisposable
 import io.reactivex.rxjava3.disposables.Disposable
 import io.reactivex.rxjava3.kotlin.plusAssign
@@ -189,44 +197,78 @@ class CarelevoPumpPlugin @Inject constructor(
         val newScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
         scope = newScope
 
+        // Settings pushes go through the queue (connect-before-execute) like every other patch op — a
+        // direct fire-and-forget write would silently fail while the pump idle-disconnects between commands.
         preferences.observe(DoubleKey.SafetyMaxBolus)
             .drop(1)
-            .onEach {
-                settingsCoordinator.updateMaxBolusDose(
-                    pluginDisposable = pluginDisposable,
-                    onLastDataUpdated = { _lastDataTime.value = System.currentTimeMillis() }
-                )
-            }.launchIn(newScope)
+            .onEach { commandQueue.customCommand(CmdUpdateMaxBolus(preferences.get(DoubleKey.SafetyMaxBolus))) }
+            .launchIn(newScope)
 
         preferences.observe(CarelevoIntPreferenceKey.CARELEVO_PATCH_EXPIRATION_REMINDER_HOURS)
             .drop(1)
             .onEach {
-                settingsCoordinator.updatePatchExpiredThreshold(
-                    pluginDisposable = pluginDisposable,
-                    onLastDataUpdated = { _lastDataTime.value = System.currentTimeMillis() }
-                )
+                val hours = sp.getInt(CarelevoIntPreferenceKey.CARELEVO_PATCH_EXPIRATION_REMINDER_HOURS.key, 0)
+                commandQueue.customCommand(CmdUpdateExpiredThreshold(hours))
             }
             .launchIn(newScope)
 
         preferences.observe(CarelevoIntPreferenceKey.CARELEVO_LOW_INSULIN_EXPIRATION_REMINDER_HOURS)
             .drop(1)
             .onEach {
-                settingsCoordinator.updateLowInsulinNoticeAmount(
-                    pluginDisposable = pluginDisposable,
-                    onLastDataUpdated = { _lastDataTime.value = System.currentTimeMillis() }
-                )
+                val hours = sp.getInt(CarelevoIntPreferenceKey.CARELEVO_LOW_INSULIN_EXPIRATION_REMINDER_HOURS.key, 0)
+                // Zero = reminder off; skip enqueuing so the pump isn't reconnected just to no-op (parity
+                // with the old coordinator's zero-skip).
+                if (hours != 0) commandQueue.customCommand(CmdUpdateLowInsulinNotice(hours))
             }
             .launchIn(newScope)
 
         preferences.observe(CarelevoBooleanPreferenceKey.CARELEVO_BUZZER_REMINDER)
             .drop(1)
             .onEach {
-                settingsCoordinator.updatePatchBuzzer(
-                    pluginDisposable = pluginDisposable,
-                    onLastDataUpdated = { _lastDataTime.value = System.currentTimeMillis() }
-                )
+                val on = sp.getBoolean(CarelevoBooleanPreferenceKey.CARELEVO_BUZZER_REMINDER.key, false)
+                commandQueue.customCommand(CmdUpdateBuzzer(on))
             }
             .launchIn(newScope)
+
+        // Deferred settings-sync recovery: a max-bolus / low-insulin change that couldn't reach the patch
+        // (changed while offline, or during a bolus) leaves a needXSyncPatch flag on the stored user
+        // settings; when the patch is booted again, push it through the queue. The combiner is PURE and the
+        // enqueue runs on IO — replaces the old side-effecting combineLatest in CarelevoPatch that ran on the
+        // main thread and called the use cases directly (bypassing the queue).
+        pluginDisposable += Observable.combineLatest(
+            carelevoPatch.patchState,
+            carelevoPatch.infusionInfo,
+            carelevoPatch.userSettingInfo
+        ) { state, infusion, setting ->
+            computeSettingsSyncNeed(state.getOrNull(), infusion.getOrNull(), setting.getOrNull())
+        }
+            .distinctUntilChanged()
+            .subscribeOn(aapsSchedulers.io)
+            .observeOn(aapsSchedulers.io)
+            .subscribe { need ->
+                newScope.launch {
+                    need.maxBolusDose?.let { commandQueue.customCommand(CmdUpdateMaxBolus(it)) }
+                    need.lowInsulinHours?.let { commandQueue.customCommand(CmdUpdateLowInsulinNotice(it)) }
+                }
+            }
+    }
+
+    private data class SettingsSyncNeed(val maxBolusDose: Double?, val lowInsulinHours: Int?)
+
+    /** Pure: which deferred patch settings still need pushing (flag set AND the patch is booted). */
+    private fun computeSettingsSyncNeed(
+        state: PatchState?,
+        infusion: CarelevoInfusionInfoDomainModel?,
+        setting: CarelevoUserSettingInfoDomainModel?
+    ): SettingsSyncNeed {
+        if (state !is PatchState.ConnectedBooted || setting == null) return SettingsSyncNeed(null, null)
+        // Max-bolus is a device safety cap — do not re-push mid-bolus (mirrors the use case's own guard).
+        // "No bolus running" requires BOTH channels idle (the deleted observeSyncPatch had this as `||`,
+        // which was true during a single-channel bolus and triggered a spurious mid-bolus reconnect).
+        val noBolusRunning = infusion?.extendBolusInfusionInfo == null && infusion?.immeBolusInfusionInfo == null
+        val maxBolusDose = if (setting.needMaxBolusDoseSyncPatch && noBolusRunning) setting.maxBolusDose ?: 0.0 else null
+        val lowInsulinHours = if (setting.needLowInsulinNoticeAmountSyncPatch) setting.lowInsulinNoticeAmount ?: 0 else null
+        return SettingsSyncNeed(maxBolusDose, lowInsulinHours)
     }
 
     private fun initializeOnStart() {
@@ -260,16 +302,6 @@ class CarelevoPumpPlugin @Inject constructor(
                         aapsLogger.debug(LTag.PUMPCOMM, "onStart: 3) profile not ready, deferring to setNewBasalProfile")
                     }
                 }
-            )
-            .andThen(
-                Completable.fromAction {
-                    aapsLogger.debug(LTag.PUMPCOMM, "onStart: 4) snapshot check start")
-                    val state = carelevoPatch.patchState.value?.getOrNull()
-                    val shouldReconnect = state == null ||
-                        (state != PatchState.NotConnectedNotBooting && state != PatchState.ConnectedBooted)
-                    aapsLogger.debug(LTag.PUMPCOMM, "onStart: 4) shouldReconnect=$shouldReconnect, state=$state")
-                    if (shouldReconnect) connectionCoordinator.startReconnection(txUuid)
-                }.doOnComplete { aapsLogger.debug(LTag.PUMPCOMM, "onStart: 4) snapshot check done") }
             )
             .subscribe(
                 { aapsLogger.debug(LTag.PUMPCOMM, "onStart: ALL COMPLETE") },
@@ -407,7 +439,10 @@ class CarelevoPumpPlugin @Inject constructor(
     }
 
     override fun isSuspended(): Boolean {
-        return carelevoPatch.resolvePatchState() == PatchState.NotConnectedBooted
+        // Real delivery-suspend (pump stopped by the user), NOT the BLE connection state. Otherwise a
+        // normal idle disconnect (NotConnectedBooted, now that disconnect() actually disconnects) would
+        // be reported as suspended and surface as an error/suspended icon on the overview.
+        return carelevoPatch.patchInfo.value?.getOrNull()?.isStopped ?: false
     }
 
     override fun isBusy(): Boolean {
@@ -608,9 +643,14 @@ class CarelevoPumpPlugin @Inject constructor(
 
     override suspend fun timezoneOrDSTChanged(timeChangeType: TimeChangeType) {
         super.timezoneOrDSTChanged(timeChangeType)
-        settingsCoordinator.timezoneOrDSTChanged(
-            pluginDisposable = pluginDisposable,
-            onLastDataUpdated = { _lastDataTime.value = System.currentTimeMillis() }
-        )
+        // Route through the queue (connect-before-execute) like every other patch op. The pump
+        // idle-disconnects between commands, so a direct fire-and-forget write would silently fail
+        // while resting. Skip ONLY when no patch is active; if the patch is present but its insulinRemain
+        // is not yet known (e.g. before the first status read after reconnect) still push with 0 rather
+        // than dropping the clock update (original `?: 0` semantics).
+        val patchInfo = carelevoPatch.patchInfo.value?.getOrNull() ?: return
+        val insulin = patchInfo.insulinRemain?.toInt() ?: 0
+        val result = commandQueue.customCommand(CmdTimeZoneUpdate(insulinAmount = insulin))
+        if (result.success) _lastDataTime.value = System.currentTimeMillis()
     }
 }

@@ -5,10 +5,12 @@ import app.aaps.core.interfaces.logging.LTag
 import app.aaps.core.interfaces.rx.AapsSchedulers
 import app.aaps.pump.carelevo.ble.core.CarelevoBleController
 import app.aaps.pump.carelevo.ble.core.Connect
+import app.aaps.pump.carelevo.ble.core.Disconnect
 import app.aaps.pump.carelevo.ble.core.DiscoveryService
 import app.aaps.pump.carelevo.ble.core.EnableNotifications
 import app.aaps.pump.carelevo.ble.data.CommandResult
 import app.aaps.pump.carelevo.ble.data.isAbnormalBondingFailed
+import app.aaps.pump.carelevo.ble.data.isConnected
 import app.aaps.pump.carelevo.ble.data.isDiscoverCleared
 import app.aaps.pump.carelevo.ble.data.isReInitialized
 import app.aaps.pump.carelevo.ble.data.shouldBeConnected
@@ -20,6 +22,7 @@ import app.aaps.pump.carelevo.domain.usecase.patch.CarelevoRequestPatchInfusionI
 import io.reactivex.rxjava3.disposables.CompositeDisposable
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.jvm.optionals.getOrNull
@@ -34,26 +37,31 @@ class CarelevoConnectionCoordinator @Inject constructor(
 ) {
 
     private var reconnectDisposable = CompositeDisposable()
+    private val reconnecting = AtomicBoolean(false)
 
     fun onStop() {
         aapsLogger.debug(LTag.PUMPCOMM, "onStop.clearReconnectDisposable")
-        reconnectDisposable.clear()
+        stopReconnection()
     }
 
     fun isInitialized(): Boolean {
+        // Activation-based, NOT connection-based (matches Omnipod Dash / Medtrum). The CommandQueue
+        // idle-disconnects between commands, so "initialized" must stay true while the link is down —
+        // otherwise the loop's applyTBRRequest / applySMBRequest gate aborts with "pump not initialized"
+        // during the normal resting state, before a command can be queued to reconnect. True once the
+        // patch is paired and its operational status has been read at least once.
         val patchInfo = carelevoPatch.patchInfo.value?.getOrNull() ?: return false
-        val address = patchInfo.address.uppercase()
-        val hasOperationalState =
-            patchInfo.mode != null ||
-                patchInfo.runningMinutes != null ||
-                patchInfo.pumpState != null
-
-        return hasOperationalState && carelevoPatch.isBleConnectedNow(address)
+        return patchInfo.mode != null ||
+            patchInfo.runningMinutes != null ||
+            patchInfo.pumpState != null
     }
 
     fun isConnected(): Boolean {
-        val address = carelevoPatch.patchInfo.value?.getOrNull()?.address?.uppercase() ?: return true // Keep the command loop from spinning when no address is available yet.
-        return carelevoPatch.isBleConnectedNow(address)
+        // No patch yet → report connected so the queue's connect-loop doesn't spin dialing a missing device.
+        carelevoPatch.patchInfo.value?.getOrNull()?.address ?: return true
+        // FULLY-ready link (bonded + service discovered + notifications enabled), NOT just ACL-connected,
+        // so the QueueWorker never executes a command mid-reconnect against a half-open GATT.
+        return carelevoPatch.btState.value?.getOrNull()?.isConnected() == true
     }
 
     fun connect(reason: String, txUuid: UUID, onLastDataUpdated: () -> Unit) {
@@ -71,6 +79,18 @@ class CarelevoConnectionCoordinator @Inject constructor(
     fun disconnect(reason: String) {
         val patchState = carelevoPatch.patchState.value?.getOrNull()
         aapsLogger.debug(LTag.PUMPCOMM, "disconnect.start reason=$reason patchState=$patchState")
+        // Actually drop the BLE link when the queue is done (matches other patch pumps): cancel any
+        // in-flight reconnection and close the GATT. The next queued command reconnects via connect().
+        stopReconnection()
+        val address = carelevoPatch.getPatchInfoAddress()?.uppercase() ?: return
+        try {
+            val result = bleController.execute(Disconnect(address))
+                .timeout(3, TimeUnit.SECONDS)
+                .blockingGet()
+            aapsLogger.debug(LTag.PUMPCOMM, "disconnect.result reason=$reason result=$result")
+        } catch (e: Throwable) {
+            aapsLogger.error(LTag.PUMPCOMM, "disconnect.error reason=$reason", e)
+        }
     }
 
     fun stopConnecting() {
@@ -111,15 +131,25 @@ class CarelevoConnectionCoordinator @Inject constructor(
     }
 
     fun startReconnection(txUuid: UUID) {
+        // Single-flight: the QueueWorker calls connect() every ~1s while waiting for isConnected(); don't
+        // restart an in-flight reconnection (and don't let a mid-reconnect btState flicker reset it).
+        if (!reconnecting.compareAndSet(false, true)) {
+            aapsLogger.debug(LTag.PUMPCOMM, "reconnect.skip already in progress")
+            return
+        }
         reconnectDisposable.clear()
         aapsLogger.debug(LTag.PUMPCOMM, "reconnect.start")
 
         if (!carelevoPatch.isBluetoothEnabled()) {
             aapsLogger.debug(LTag.PUMPCOMM, "reconnect.skip reason=bluetoothDisabled")
+            reconnecting.set(false)
             return
         }
 
-        val address = carelevoPatch.patchInfo.value?.getOrNull()?.address?.uppercase() ?: return
+        val address = carelevoPatch.patchInfo.value?.getOrNull()?.address?.uppercase() ?: run {
+            reconnecting.set(false)
+            return
+        }
         aapsLogger.debug(LTag.PUMPCOMM, "reconnect.target address=$address")
 
         reconnectDisposable.add(
@@ -210,5 +240,6 @@ class CarelevoConnectionCoordinator @Inject constructor(
     private fun stopReconnection() {
         aapsLogger.debug(LTag.PUMPCOMM, "reconnect.stop")
         reconnectDisposable.clear()
+        reconnecting.set(false)
     }
 }

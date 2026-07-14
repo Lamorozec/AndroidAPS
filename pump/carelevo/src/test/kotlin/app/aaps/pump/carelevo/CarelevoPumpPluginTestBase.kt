@@ -21,10 +21,16 @@ import app.aaps.core.interfaces.utils.DateUtil
 import app.aaps.core.interfaces.utils.fabric.FabricPrivacy
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.pump.carelevo.ble.core.CarelevoBleController
+import app.aaps.pump.carelevo.ble.data.BleState
+import app.aaps.pump.carelevo.ble.data.BondingState
+import app.aaps.pump.carelevo.ble.data.DeviceModuleState
+import app.aaps.pump.carelevo.ble.data.NotificationState
+import app.aaps.pump.carelevo.ble.data.PeripheralConnectionState
+import app.aaps.pump.carelevo.ble.data.ServiceDiscoverState
+import app.aaps.pump.carelevo.command.CarelevoActivationExecutor
 import app.aaps.pump.carelevo.common.CarelevoAlarmNotifier
 import app.aaps.pump.carelevo.common.CarelevoPatch
 import app.aaps.pump.carelevo.common.model.PatchState
-import app.aaps.pump.carelevo.command.CarelevoActivationExecutor
 import app.aaps.pump.carelevo.coordinator.CarelevoBasalProfileUpdateCoordinator
 import app.aaps.pump.carelevo.coordinator.CarelevoBolusCoordinator
 import app.aaps.pump.carelevo.coordinator.CarelevoConnectionCoordinator
@@ -46,13 +52,8 @@ import app.aaps.pump.carelevo.domain.usecase.bolus.CarelevoStartExtendBolusInfus
 import app.aaps.pump.carelevo.domain.usecase.bolus.CarelevoStartImmeBolusInfusionUseCase
 import app.aaps.pump.carelevo.domain.usecase.bolus.model.CancelBolusInfusionResponseModel
 import app.aaps.pump.carelevo.domain.usecase.bolus.model.StartImmeBolusInfusionResponseModel
-import app.aaps.pump.carelevo.domain.usecase.patch.CarelevoPatchTimeZoneUpdateUseCase
 import app.aaps.pump.carelevo.domain.usecase.patch.CarelevoRequestPatchInfusionInfoUseCase
 import app.aaps.pump.carelevo.domain.usecase.userSetting.CarelevoDeleteUserSettingInfoUseCase
-import app.aaps.pump.carelevo.domain.usecase.userSetting.CarelevoPatchBuzzModifyUseCase
-import app.aaps.pump.carelevo.domain.usecase.userSetting.CarelevoPatchExpiredThresholdModifyUseCase
-import app.aaps.pump.carelevo.domain.usecase.userSetting.CarelevoUpdateLowInsulinNoticeAmountUseCase
-import app.aaps.pump.carelevo.domain.usecase.userSetting.CarelevoUpdateMaxBolusDoseUseCase
 import io.reactivex.rxjava3.core.Single
 import io.reactivex.rxjava3.schedulers.Schedulers
 import io.reactivex.rxjava3.subjects.BehaviorSubject
@@ -110,16 +111,10 @@ abstract class CarelevoPumpPluginTestBase {
     @Mock lateinit var cancelExtendBolusInfusionUseCase: CarelevoCancelExtendBolusInfusionUseCase
     @Mock lateinit var finishImmeBolusInfusionUseCase: CarelevoFinishImmeBolusInfusionUseCase
 
-    @Mock lateinit var updateMaxBolusDoseUseCase: CarelevoUpdateMaxBolusDoseUseCase
-    @Mock lateinit var updateLowInsulinNoticeAmountUseCase: CarelevoUpdateLowInsulinNoticeAmountUseCase
     @Mock lateinit var deleteUserSettingInfoUseCase: CarelevoDeleteUserSettingInfoUseCase
 
     @Mock lateinit var requestPatchInfusionInfoUseCase: CarelevoRequestPatchInfusionInfoUseCase
     @Mock lateinit var carelevoAlarmNotifier: CarelevoAlarmNotifier
-
-    @Mock lateinit var carelevoPatchTimeZoneUpdateUseCase: CarelevoPatchTimeZoneUpdateUseCase
-    @Mock lateinit var carelevoPatchExpiredThresholdModifyUseCase: CarelevoPatchExpiredThresholdModifyUseCase
-    @Mock lateinit var carelevoPatchBuzzModifyUseCase: CarelevoPatchBuzzModifyUseCase
 
     protected lateinit var plugin: CarelevoPumpPlugin
     protected lateinit var testProfile: Profile
@@ -128,6 +123,7 @@ abstract class CarelevoPumpPluginTestBase {
     protected lateinit var infusionInfoSubject: BehaviorSubject<Optional<CarelevoInfusionInfoDomainModel>>
     protected lateinit var profileSubject: BehaviorSubject<Optional<Profile>>
     protected lateinit var patchStateSubject: BehaviorSubject<Optional<PatchState>>
+    protected lateinit var btStateSubject: BehaviorSubject<Optional<BleState>>
 
     @BeforeEach
     fun setupCarelevoPlugin() {
@@ -146,14 +142,15 @@ abstract class CarelevoPumpPluginTestBase {
         infusionInfoSubject = BehaviorSubject.createDefault(Optional.of(CarelevoInfusionInfoDomainModel()))
         profileSubject = BehaviorSubject.createDefault(Optional.of(testProfile))
         patchStateSubject = BehaviorSubject.createDefault(Optional.of(PatchState.ConnectedBooted))
+        btStateSubject = BehaviorSubject.createDefault(Optional.of(connectedBleState()))
         whenever(carelevoPatch.patchInfo).thenReturn(patchInfoSubject)
         whenever(carelevoPatch.infusionInfo).thenReturn(infusionInfoSubject)
         whenever(carelevoPatch.profile).thenReturn(profileSubject)
         whenever(carelevoPatch.patchState).thenReturn(patchStateSubject)
+        whenever(carelevoPatch.btState).thenReturn(btStateSubject)
         doReturn(PatchState.ConnectedBooted).whenever(carelevoPatch).resolvePatchState()
         whenever(carelevoPatch.isBluetoothEnabled()).thenReturn(true)
         whenever(carelevoPatch.isCarelevoConnected()).thenReturn(true)
-        whenever(carelevoPatch.isBleConnectedNow(any())).thenReturn(true)
 
         whenever(startImmeBolusInfusionUseCase.execute(any())).thenReturn(
             Single.just(ResponseResult.Success(StartImmeBolusInfusionResponseModel(expectSec = 1)))
@@ -169,7 +166,6 @@ abstract class CarelevoPumpPluginTestBase {
         whenever(cancelTempBasalInfusionUseCase.execute()).thenReturn(Single.just(ResponseResult.Success(ResultSuccess)))
 
         whenever(requestPatchInfusionInfoUseCase.execute()).thenReturn(Single.just(ResponseResult.Success(ResultSuccess)))
-        whenever(carelevoPatchTimeZoneUpdateUseCase.execute(any())).thenReturn(Single.just(ResponseResult.Success(ResultSuccess)))
 
         val pumpEnactResultProvider = Provider<PumpEnactResult> { FakePumpEnactResult() }
         val basalProfileUpdateCoordinator = CarelevoBasalProfileUpdateCoordinator(
@@ -217,15 +213,7 @@ abstract class CarelevoPumpPluginTestBase {
         val settingsCoordinator = CarelevoSettingsCoordinator(
             aapsLogger = aapsLogger,
             aapsSchedulers = aapsSchedulers,
-            preferences = preferences,
-            sp = sp,
-            carelevoPatch = carelevoPatch,
-            updateMaxBolusDoseUseCase = updateMaxBolusDoseUseCase,
-            updateLowInsulinNoticeAmountUseCase = updateLowInsulinNoticeAmountUseCase,
-            deleteUserSettingInfoUseCase = deleteUserSettingInfoUseCase,
-            carelevoPatchTimeZoneUpdateUseCase = carelevoPatchTimeZoneUpdateUseCase,
-            carelevoPatchExpiredThresholdModifyUseCase = carelevoPatchExpiredThresholdModifyUseCase,
-            carelevoPatchBuzzModifyUseCase = carelevoPatchBuzzModifyUseCase
+            deleteUserSettingInfoUseCase = deleteUserSettingInfoUseCase
         )
 
         plugin = CarelevoPumpPlugin(
@@ -260,6 +248,16 @@ abstract class CarelevoPumpPluginTestBase {
         }
     }
 
+    /** Fully-ready link (bonded + discovered + notifications) so `BleState.isConnected()` returns true. */
+    protected fun connectedBleState(): BleState =
+        BleState(
+            isEnabled = DeviceModuleState.DEVICE_STATE_ON,
+            isBonded = BondingState.BOND_BONDED,
+            isServiceDiscovered = ServiceDiscoverState.DISCOVER_STATE_DISCOVERED,
+            isConnected = PeripheralConnectionState.CONN_STATE_CONNECTED,
+            isNotificationEnabled = NotificationState.NOTIFICATION_ENABLED
+        )
+
     protected fun samplePatchInfo(
         address: String = "AA:BB:CC:DD:EE:FF",
         manufactureNumber: String = "CARELEVO-TEST-001",
@@ -275,6 +273,10 @@ abstract class CarelevoPumpPluginTestBase {
             bolusActionSeq = bolusActionSeq,
             mode = 1
         )
+
+    /** A concrete [PumpEnactResult] for stubbing suspend queue calls (e.g. `commandQueue.customCommand`). */
+    protected fun fakePumpEnactResult(success: Boolean = true): PumpEnactResult =
+        FakePumpEnactResult().success(success).enacted(success)
 
     private class FakePumpEnactResult : PumpEnactResult {
 

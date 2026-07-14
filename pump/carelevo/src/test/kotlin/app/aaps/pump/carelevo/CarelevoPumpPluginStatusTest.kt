@@ -1,6 +1,7 @@
 package app.aaps.pump.carelevo
 
 import app.aaps.core.data.pump.defs.TimeChangeType
+import app.aaps.pump.carelevo.command.CmdTimeZoneUpdate
 import app.aaps.pump.carelevo.domain.model.ResponseResult
 import app.aaps.pump.carelevo.domain.model.result.ResultSuccess
 import com.google.common.truth.Truth.assertThat
@@ -66,13 +67,15 @@ class CarelevoPumpPluginStatusTest : CarelevoPumpPluginTestBase() {
     }
 
     @Test
-    fun `timezoneOrDSTChanged should call timezone update use case`() {
-        whenever(carelevoPatchTimeZoneUpdateUseCase.execute(any())).thenReturn(
-            Single.just(ResponseResult.Success(ResultSuccess))
-        )
+    fun `timezoneOrDSTChanged should route a CmdTimeZoneUpdate through the command queue`() {
+        // Now managed by the queue (connect-before-execute) instead of a direct BLE write, so a resting
+        // pump reconnects first. The executor runs the timezone use case on the queue worker thread.
+        runBlocking {
+            whenever(commandQueue.customCommand(any())).thenReturn(fakePumpEnactResult())
 
-        runBlocking { plugin.timezoneOrDSTChanged(TimeChangeType.TimezoneChanged) }
+            plugin.timezoneOrDSTChanged(TimeChangeType.TimezoneChanged)
 
-        verify(carelevoPatchTimeZoneUpdateUseCase).execute(any())
+            verify(commandQueue).customCommand(any<CmdTimeZoneUpdate>())
+        }
     }
 }

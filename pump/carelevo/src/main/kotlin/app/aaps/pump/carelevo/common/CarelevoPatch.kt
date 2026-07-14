@@ -46,22 +46,18 @@ import app.aaps.pump.carelevo.domain.usecase.patch.CarelevoRequestPatchInfusionI
 import app.aaps.pump.carelevo.domain.usecase.patch.model.CarelevoPatchRptInfusionInfoDefaultRequestModel
 import app.aaps.pump.carelevo.domain.usecase.patch.model.CarelevoPatchRptInfusionInfoRequestModel
 import app.aaps.pump.carelevo.domain.usecase.userSetting.CarelevoCreateUserSettingInfoUseCase
-import app.aaps.pump.carelevo.domain.usecase.userSetting.CarelevoUpdateLowInsulinNoticeAmountUseCase
-import app.aaps.pump.carelevo.domain.usecase.userSetting.CarelevoUpdateMaxBolusDoseUseCase
 import app.aaps.pump.carelevo.domain.usecase.userSetting.CarelevoUserSettingInfoMonitorUseCase
 import app.aaps.pump.carelevo.domain.usecase.userSetting.model.CarelevoUserSettingInfoRequestModel
-import app.aaps.pump.carelevo.event.EventForceStopConnecting
 import io.reactivex.rxjava3.core.Completable
-import io.reactivex.rxjava3.core.Observable
 import io.reactivex.rxjava3.core.Single
 import io.reactivex.rxjava3.disposables.CompositeDisposable
-import io.reactivex.rxjava3.disposables.Disposable
 import io.reactivex.rxjava3.kotlin.plusAssign
 import io.reactivex.rxjava3.schedulers.Schedulers
 import io.reactivex.rxjava3.subjects.BehaviorSubject
 import java.time.LocalDateTime
 import java.util.Optional
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import kotlin.jvm.optionals.getOrNull
 import kotlin.math.abs
@@ -79,15 +75,12 @@ class CarelevoPatch @Inject constructor(
     private val patchInfoMonitorUseCase: CarelevoPatchInfoMonitorUseCase,
     private val userSettingInfoMonitorUseCase: CarelevoUserSettingInfoMonitorUseCase,
     private val patchRptInfusionInfoProcessUseCase: CarelevoPatchRptInfusionInfoProcessUseCase,
-    private val updateMaxBolusDoseUseCase: CarelevoUpdateMaxBolusDoseUseCase,
-    private val updateLowInsulinNoticeAmountUseCase: CarelevoUpdateLowInsulinNoticeAmountUseCase,
     private val createUserSettingInfoUseCase: CarelevoCreateUserSettingInfoUseCase,
     private val carelevoAlarmInfoUseCase: CarelevoAlarmInfoUseCase,
     private val requestPatchInfusionInfoUseCase: CarelevoRequestPatchInfusionInfoUseCase
 ) {
 
     private val bleDisposable = CompositeDisposable()
-    private var connectingDisposable: Disposable? = null
 
     private val infoDisposable = CompositeDisposable()
 
@@ -143,7 +136,6 @@ class CarelevoPatch @Inject constructor(
             observePatch()
             observeInfusionInfo()
             observeUserSettingInfo()
-            observeSyncPatch()
             _isWorking = true
         }
     }
@@ -179,10 +171,6 @@ class CarelevoPatch @Inject constructor(
         return address != null && validAddress != null && isConnected && address.equals(validAddress, ignoreCase = true)
     }
 
-    fun isBleConnectedNow(address: String): Boolean {
-        return bleController.isConnectedNow(address)
-    }
-
     fun getPatchInfoAddress(): String? {
         return patchInfo.value?.getOrNull()?.address
     }
@@ -201,14 +189,6 @@ class CarelevoPatch @Inject constructor(
 
     private fun observeChangeState() {
         aapsLogger.debug(LTag.PUMPCOMM, "observeChangeState called")
-        bleDisposable += rxBus.toObservable(EventForceStopConnecting::class.java)
-            .observeOn(aapsSchedulers.main)
-            .subscribe {
-                aapsLogger.warn(LTag.PUMPCOMM, "Force stop connectingDisposable")
-                connectingDisposable?.dispose()
-                connectingDisposable = null
-            }
-
         bleDisposable += BehaviorSubject.combineLatest(
             btState,
             patchInfo
@@ -238,7 +218,6 @@ class CarelevoPatch @Inject constructor(
                     rxBus.send(EventPumpStatusChanged(EventPumpStatusChanged.Status.DISCONNECTED))
                     rxBus.send(EventRefreshOverview("Carelevo connection state", true))
                     rxBus.send(EventCustomActionsChanged())
-                    stopObservingConnection()
                 }
 
                 is PatchState.ConnectedBooted        -> {
@@ -246,21 +225,10 @@ class CarelevoPatch @Inject constructor(
                     rxBus.send(EventPumpStatusChanged(EventPumpStatusChanged.Status.CONNECTED))
                     rxBus.send(EventRefreshOverview("Carelevo connection state", true))
                     rxBus.send(EventCustomActionsChanged())
-                    stopObservingConnection()
                 }
 
                 is PatchState.NotConnectedBooted     -> {
                     aapsLogger.debug(LTag.PUMPCOMM, "patch state is NotConnectedBooted")
-
-                    /*connectingDisposable?.dispose()
-                    connectingDisposable = Observable.interval(0, 1, TimeUnit.SECONDS)
-                        .observeOn(aapsSchedulers.main)
-                        .takeUntil {
-                            btState.getOrNull()?.isPeripheralConnected() == true || it > 60
-                        }
-                        .subscribe { n ->
-                            rxBus.send(EventPumpStatusChanged(EventPumpStatusChanged.Status.CONNECTING, n.toInt()))
-                        }*/
                 }
 
                 else                                 -> {
@@ -283,13 +251,6 @@ class CarelevoPatch @Inject constructor(
             .subscribe {
                 aapsLogger.debug(LTag.PUMPCOMM, "result : $it")
             }
-    }
-
-    private fun stopObservingConnection() {
-        if (connectingDisposable != null) {
-            connectingDisposable!!.dispose()
-            connectingDisposable = null
-        }
     }
 
     fun isBluetoothEnabled(): Boolean {
@@ -359,13 +320,43 @@ class CarelevoPatch @Inject constructor(
 
     fun flushPatchInformation() {
         //unBondDevice()
-        bleController.clearGatt()
-        bleController.unRegisterPeripheralInfo()
-        // Clear cached patch/infusion info so a deactivated patch is no longer "known": this resets
+        // Clear cached patch/infusion info FIRST, before tearing down the link. This resets
         // isCheckScreen (was keeping the wizard latched to SAFETY_CHECK after a mid-activation discard)
-        // and lets patchState fall back to NotConnectedNotBooting.
+        // and immediately drops patchState to NotConnectedNotBooting. Ordering matters: clearGatt() ->
+        // disableManager() blocks ~300ms (Thread.sleep) with the link already reported down, and if
+        // patchInfo were still present during that window the CommandQueue worker would see
+        // NotConnectedBooted and fire a reconnect at the patch we are discarding.
         _patchInfo.onNext(Optional.empty())
         _infusionInfo.onNext(Optional.empty())
+        bleController.clearGatt()
+        bleController.unRegisterPeripheralInfo()
+    }
+
+    private val discardInProgress = AtomicBoolean(false)
+
+    /**
+     * Full BLE teardown for a discarded patch: remove the OS bond, then [releasePatch] (clear GATT +
+     * cached patch info). Single-flight — if a teardown is already running (e.g. a queued CmdDiscard
+     * racing the ViewModel force-discard fallback), the second caller is skipped so two threads never
+     * mutate the GATT handle at once. Self-contained: logs an unconfirmed unbond and swallows teardown
+     * errors, so callers report the already-decided discard result unaffected.
+     */
+    fun discardTeardown() {
+        if (!discardInProgress.compareAndSet(false, true)) {
+            aapsLogger.debug(LTag.PUMPCOMM, "discardTeardown skipped (already in progress)")
+            return
+        }
+        try {
+            val unbond = bleController.unBondDevice()
+            if (unbond !is CommandResult.Success) {
+                aapsLogger.warn(LTag.PUMPCOMM, "discardTeardown unbond not confirmed: $unbond")
+            }
+            releasePatch()
+        } catch (e: Exception) {
+            aapsLogger.error(LTag.PUMPCOMM, "discardTeardown error", e)
+        } finally {
+            discardInProgress.set(false)
+        }
     }
 
     private fun observePatch() {
@@ -552,91 +543,18 @@ class CarelevoPatch @Inject constructor(
             }
     }
 
-    private fun observeSyncPatch() {
-        infoDisposable += Observable.combineLatest(
-            patchState,
-            infusionInfo,
-            userSettingInfo
-        ) { state, infusionInfo, userSettingInfo ->
-            if (state.getOrNull() is PatchState.ConnectedBooted && (infusionInfo.getOrNull()?.extendBolusInfusionInfo == null || infusionInfo.getOrNull()?.immeBolusInfusionInfo == null) && (userSettingInfo?.getOrNull()?.needMaxBolusDoseSyncPatch == true)) {
-                updateMaxBolusDose(userSettingInfo.getOrNull()?.maxBolusDose ?: 0.0)
-            }
-
-            if (state.getOrNull() is PatchState.ConnectedBooted && (userSettingInfo?.getOrNull()?.needLowInsulinNoticeAmountSyncPatch == true)) {
-                updateLowInsulinNoticeAmount(userSettingInfo.getOrNull()?.lowInsulinNoticeAmount ?: 0)
-            }
-        }.observeOn(aapsSchedulers.main)
-            .subscribeOn(aapsSchedulers.io)
-            .subscribe {
-                aapsLogger.debug(LTag.PUMPCOMM, "response success")
-            }
-    }
-
-    private fun updateMaxBolusDose(maxBolusDose: Double) {
-        val requestModel = CarelevoUserSettingInfoRequestModel(
-            patchState = patchState.value?.getOrNull(),
-            maxBolusDose = maxBolusDose
-        )
-
-        infoDisposable += updateMaxBolusDoseUseCase.execute(requestModel)
-            .timeout(3000L, TimeUnit.MILLISECONDS)
-            .subscribeOn(aapsSchedulers.io)
-            .observeOn(aapsSchedulers.main)
-            .subscribe { response ->
-                when (response) {
-                    is ResponseResult.Success -> {
-                        aapsLogger.debug(LTag.PUMPCOMM, "response success")
-                    }
-
-                    is ResponseResult.Error   -> {
-                        aapsLogger.error(LTag.PUMPCOMM, "response error : ${response.e}")
-                    }
-
-                    else                      -> {
-                        aapsLogger.error(LTag.PUMPCOMM, "response failed")
-                    }
-                }
-            }
-    }
-
-    private fun updateLowInsulinNoticeAmount(lowInsulinNoticeAmount: Int) {
-        val requestModel = CarelevoUserSettingInfoRequestModel(
-            patchState = patchState.value?.getOrNull(),
-            lowInsulinNoticeAmount = lowInsulinNoticeAmount
-        )
-        infoDisposable += updateLowInsulinNoticeAmountUseCase.execute(requestModel)
-            .timeout(3000L, TimeUnit.MILLISECONDS)
-            .subscribeOn(aapsSchedulers.io)
-            .observeOn(aapsSchedulers.main)
-            .subscribe { response ->
-                when (response) {
-                    is ResponseResult.Success -> {
-                        aapsLogger.debug(LTag.PUMPCOMM, "response success")
-                    }
-
-                    is ResponseResult.Error   -> {
-                        aapsLogger.error(LTag.PUMPCOMM, "response error : ${response.e}")
-                    }
-
-                    else                      -> {
-                        aapsLogger.error(LTag.PUMPCOMM, "response failed")
-                    }
-                }
-            }
-    }
-
     private fun createUserSettingInfo() {
-        val maxBolusDose = preferences.get(DoubleKey.SafetyMaxBolus)
-        val lowInsulinNoticeAmount = sp.getInt(CarelevoIntPreferenceKey.CARELEVO_LOW_INSULIN_EXPIRATION_REMINDER_HOURS.key, 30)
-
-        val requestModel = CarelevoUserSettingInfoRequestModel(
-            lowInsulinNoticeAmount = lowInsulinNoticeAmount,
-            maxBasalSpeed = 15.0,
-            maxBolusDose = maxBolusDose
-        )
-        infoDisposable += createUserSettingInfoUseCase.execute(requestModel)
+        // Read prefs + build the request on IO: createUserSettingInfo() runs from observeUserSettingInfo's
+        // Main-thread subscribe, and SharedPreferences reads on the main thread risk an ANR.
+        infoDisposable += Single.fromCallable {
+            CarelevoUserSettingInfoRequestModel(
+                lowInsulinNoticeAmount = sp.getInt(CarelevoIntPreferenceKey.CARELEVO_LOW_INSULIN_EXPIRATION_REMINDER_HOURS.key, 30),
+                maxBasalSpeed = 15.0,
+                maxBolusDose = preferences.get(DoubleKey.SafetyMaxBolus)
+            )
+        }
             .subscribeOn(aapsSchedulers.io)
-            .observeOn(aapsSchedulers.main)
+            .flatMap { createUserSettingInfoUseCase.execute(it) }
             .subscribe()
     }
 

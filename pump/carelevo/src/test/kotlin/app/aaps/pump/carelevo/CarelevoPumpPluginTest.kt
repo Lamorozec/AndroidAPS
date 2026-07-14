@@ -3,12 +3,9 @@ package app.aaps.pump.carelevo
 import app.aaps.core.data.plugin.PluginType
 import app.aaps.core.data.pump.defs.ManufacturerType
 import app.aaps.core.data.pump.defs.PumpType
-import app.aaps.pump.carelevo.common.model.PatchState
 import com.google.common.truth.Truth.assertThat
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
-import org.mockito.kotlin.any
-import org.mockito.kotlin.whenever
 import java.util.Optional
 
 class CarelevoPumpPluginTest : CarelevoPumpPluginTestBase() {
@@ -38,22 +35,25 @@ class CarelevoPumpPluginTest : CarelevoPumpPluginTestBase() {
     }
 
     @Test
-    fun `isInitialized should return false when BLE is disconnected`() {
-        whenever(carelevoPatch.isBleConnectedNow(any())).thenReturn(false)
+    fun `isInitialized should stay true when BLE is disconnected`() {
+        // Activation-based (like Omnipod Dash / Medtrum): the queue idle-disconnects between commands,
+        // so a down link must NOT report the pump as un-initialized (that would abort the loop's
+        // TBR/SMB enact before a command can be queued to reconnect).
+        btStateSubject.onNext(Optional.empty())
 
-        assertThat(plugin.isInitialized()).isFalse()
+        assertThat(plugin.isConnected()).isFalse() // link really is down...
+        assertThat(plugin.isInitialized()).isTrue() // ...yet the pump is still initialized
     }
 
     @Test
     fun `isInitialized should return false when operational state is missing`() {
         patchInfoSubject.onNext(Optional.of(samplePatchInfo().copy(mode = null, runningMinutes = null, pumpState = null)))
-        whenever(carelevoPatch.isBleConnectedNow(any())).thenReturn(true)
 
         assertThat(plugin.isInitialized()).isFalse()
     }
 
     @Test
-    fun `isInitialized should return true when BLE is connected and operational state exists`() {
+    fun `isInitialized should return true when patch is paired and operational state exists`() {
         assertThat(plugin.isInitialized()).isTrue()
     }
 
@@ -65,18 +65,27 @@ class CarelevoPumpPluginTest : CarelevoPumpPluginTestBase() {
     }
 
     @Test
-    fun `isConnected should reflect BLE connection when address exists`() {
+    fun `isConnected should reflect the fully-ready BLE link when address exists`() {
         patchInfoSubject.onNext(Optional.of(samplePatchInfo(address = "11:22:33:44:55:66")))
-        whenever(carelevoPatch.isBleConnectedNow("11:22:33:44:55:66")).thenReturn(true)
 
+        // Fully-ready link (default fixture) → connected.
+        btStateSubject.onNext(Optional.of(connectedBleState()))
         assertThat(plugin.isConnected()).isTrue()
+
+        // Half-open / no link → NOT connected (strict: the queue must not run a command mid-reconnect).
+        btStateSubject.onNext(Optional.empty())
+        assertThat(plugin.isConnected()).isFalse()
     }
 
     @Test
-    fun `isSuspended should be true only for NotConnectedBooted`() {
-        whenever(carelevoPatch.resolvePatchState()).thenReturn(PatchState.NotConnectedBooted)
-
+    fun `isSuspended should reflect patch isStopped flag not the BLE link state`() {
+        // Real delivery-suspend (pump stopped by the user), independent of connection: a normal idle
+        // disconnect must NOT read as suspended (that surfaced as a false error/suspended icon before).
+        patchInfoSubject.onNext(Optional.of(samplePatchInfo().copy(isStopped = true)))
         assertThat(plugin.isSuspended()).isTrue()
+
+        patchInfoSubject.onNext(Optional.of(samplePatchInfo().copy(isStopped = false)))
+        assertThat(plugin.isSuspended()).isFalse()
     }
 
     @Test

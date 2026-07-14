@@ -6,7 +6,6 @@ import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
 import app.aaps.core.interfaces.queue.CommandQueue
 import app.aaps.core.interfaces.rx.AapsSchedulers
-import app.aaps.pump.carelevo.ble.core.CarelevoBleController
 import app.aaps.pump.carelevo.command.CarelevoActivationExecutor
 import app.aaps.pump.carelevo.command.CmdAdditionalPriming
 import app.aaps.pump.carelevo.command.CmdDiscard
@@ -38,7 +37,6 @@ import kotlin.jvm.optionals.getOrNull
 class CarelevoPatchSafetyCheckViewModel @Inject constructor(
     private val aapsSchedulers: AapsSchedulers,
     private val aapsLogger: AAPSLogger,
-    private val bleController: CarelevoBleController,
     private val carelevoPatch: CarelevoPatch,
     private val commandQueue: CommandQueue,
     private val activationExecutor: CarelevoActivationExecutor,
@@ -170,8 +168,7 @@ class CarelevoPatchSafetyCheckViewModel @Inject constructor(
                 viewModelScope.launch {
                     val result = commandQueue.customCommand(CmdDiscard())
                     if (result.success) {
-                        bleController.unBondDevice()
-                        carelevoPatch.releasePatch()
+                        // unBond + releasePatch now run inside CmdDiscard on the queue thread
                         setUiState(UiState.Idle)
                         triggerEvent(CarelevoConnectSafetyCheckEvent.DiscardComplete)
                     } else {
@@ -197,8 +194,7 @@ class CarelevoPatchSafetyCheckViewModel @Inject constructor(
                 when (response) {
                     is ResponseResult.Success -> {
                         aapsLogger.debug(LTag.PUMPCOMM, "response success")
-                        bleController.unBondDevice()
-                        carelevoPatch.releasePatch()
+                        carelevoPatch.discardTeardown()
                         setUiState(UiState.Idle)
                         triggerEvent(CarelevoConnectSafetyCheckEvent.DiscardComplete)
                     }

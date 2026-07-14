@@ -190,10 +190,6 @@ class CarelevoBleControllerImpl @Inject constructor(
         return true
     }
 
-    override fun isConnectedNow(address: String): Boolean {
-        return btManager.isConnected(address)
-    }
-
     private fun initializedBluetoothState() {
         CarelevoBleSource._bluetoothState.onNext(
             BleState(

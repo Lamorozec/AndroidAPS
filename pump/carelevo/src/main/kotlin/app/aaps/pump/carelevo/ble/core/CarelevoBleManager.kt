@@ -12,7 +12,6 @@ interface CarelevoBleManager {
     fun isNotificationEnabled(): Boolean
     fun registerPeripheralInfoRegistered()
     fun unRegisterPeripheralInfoRegistered()
-    fun isConnected(macAddress: String): Boolean
     fun getGatt(): BluetoothGatt?
     fun clearGatt()
     fun isBonded(macAddress: String): Boolean

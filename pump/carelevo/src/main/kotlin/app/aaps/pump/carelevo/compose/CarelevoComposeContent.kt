@@ -135,16 +135,6 @@ class CarelevoComposeContent(
                     )
                 }
 
-                CarelevoScreenType.COMMUNICATION_CHECK -> {
-                    CarelevoCommunicationCheckScreen(
-                        setToolbarConfig = setToolbarConfig,
-                        onExit = {
-                            manualWorkflowScreen = null
-                            latchedWorkflowScreen = null
-                        }
-                    )
-                }
-
                 else -> {
                     CarelevoPatchFlowScreen(
                         screenType = activeWorkflowScreen,

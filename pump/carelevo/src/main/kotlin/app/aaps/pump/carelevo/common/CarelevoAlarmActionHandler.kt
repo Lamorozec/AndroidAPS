@@ -1,51 +1,39 @@
 package app.aaps.pump.carelevo.common
 
-import app.aaps.core.data.pump.defs.PumpType
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
-import app.aaps.core.interfaces.pump.PumpSync
 import app.aaps.core.interfaces.rx.AapsSchedulers
-import app.aaps.core.interfaces.utils.DateUtil
-import app.aaps.pump.carelevo.R
-import app.aaps.pump.carelevo.ble.core.CarelevoBleController
-import app.aaps.pump.carelevo.ble.core.Disconnect
-import app.aaps.pump.carelevo.domain.model.ResponseResult
+import app.aaps.pump.carelevo.coordinator.CarelevoAlarmClearCoordinator
 import app.aaps.pump.carelevo.domain.model.alarm.CarelevoAlarmInfo
 import app.aaps.pump.carelevo.domain.type.AlarmCause
 import app.aaps.pump.carelevo.domain.type.AlarmType
-import app.aaps.pump.carelevo.domain.usecase.alarm.AlarmClearPatchDiscardUseCase
-import app.aaps.pump.carelevo.domain.usecase.alarm.AlarmClearRequestUseCase
 import app.aaps.pump.carelevo.domain.usecase.alarm.CarelevoAlarmInfoUseCase
-import app.aaps.pump.carelevo.domain.usecase.alarm.model.AlarmClearUseCaseRequest
-import app.aaps.pump.carelevo.domain.usecase.infusion.CarelevoPumpResumeUseCase
 import app.aaps.pump.carelevo.presentation.model.AlarmEvent
 import io.reactivex.rxjava3.core.Single
 import io.reactivex.rxjava3.disposables.CompositeDisposable
 import io.reactivex.rxjava3.kotlin.plusAssign
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.runBlocking
-import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
-import kotlin.jvm.optionals.getOrNull
 
 @Singleton
 class CarelevoAlarmActionHandler @Inject constructor(
-    private val pumpSync: PumpSync,
-    private val dateUtil: DateUtil,
     private val aapsLogger: AAPSLogger,
     private val aapsSchedulers: AapsSchedulers,
-    private val carelevoPatch: CarelevoPatch,
-    private val bleController: CarelevoBleController,
     private val alarmUseCase: CarelevoAlarmInfoUseCase,
-    private val alarmClearRequestUseCase: AlarmClearRequestUseCase,
-    private val alarmClearPatchDiscardUseCase: AlarmClearPatchDiscardUseCase,
-    private val carelevoPumpResumeUseCase: CarelevoPumpResumeUseCase
+    private val alarmClearCoordinator: CarelevoAlarmClearCoordinator
 ) {
+
+    // App-lifetime scope (this is a @Singleton): drives the suspend queue-routed alarm-clear ops.
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     private val _alarmQueue = MutableStateFlow<List<CarelevoAlarmInfo>>(emptyList())
     val alarmQueue = _alarmQueue.asStateFlow()
@@ -60,16 +48,6 @@ class CarelevoAlarmActionHandler @Inject constructor(
     var alarmInfo: CarelevoAlarmInfo? = null
 
     private val compositeDisposable = CompositeDisposable()
-
-    private val patchAddress: String? = carelevoPatch.getPatchInfoAddress()
-
-    private fun isPatchConnected(): Boolean {
-        return carelevoPatch.isCarelevoConnected()
-    }
-
-    private fun getConnectedAddress(): String? {
-        return patchAddress
-    }
 
     fun observeAlarms() =
         alarmUseCase.observeAlarms()
@@ -93,13 +71,17 @@ class CarelevoAlarmActionHandler @Inject constructor(
 
         aapsLogger.debug(LTag.PUMPCOMM, "startAlarmClearProcess alarmType=$alarmType, alarmCause=$alarmCause")
 
+        // The BLE ops now go through the CommandQueue (it reconnects a resting pump first), so there is no
+        // isPatchConnected() pre-gate; the old "disconnected" fallback becomes the on-failure path.
         when (alarmCause) {
             AlarmCause.ALARM_ALERT_RESUME_INSULIN_DELIVERY_TIMEOUT -> {
-                if (isPatchConnected()) {
-                    startAlarmClearRequestProcess(info)
-                    startInfusionResumeProcess(info)
-                } else {
-                    triggerEvent(AlarmEvent.ShowToastMessage(R.string.alarm_feat_msg_check_patch_connect))
+                scope.launch {
+                    // Resume only if the alarm was actually cleared on the patch — do not resume delivery
+                    // into an unresolved alarm condition (consistent with the in-app screen).
+                    if (alarmClearCoordinator.clearAlarmOnPatch(info)) {
+                        acknowledgeAndRemoveAlarm(info.alarmId)
+                        alarmClearCoordinator.resumeInfusion()
+                    }
                 }
             }
 
@@ -113,10 +95,9 @@ class CarelevoAlarmActionHandler @Inject constructor(
             AlarmCause.ALARM_NOTICE_LOW_INSULIN,
             AlarmCause.ALARM_NOTICE_PATCH_EXPIRED,
             AlarmCause.ALARM_NOTICE_ATTACH_PATCH_CHECK             -> {
-                if (isPatchConnected()) {
-                    startAlarmClearRequestProcess(info)
-                } else {
-                    startAlarmAlertAbnormalClearProcess(info, alarmCause)
+                scope.launch {
+                    if (alarmClearCoordinator.clearAlarmOnPatch(info)) acknowledgeAndRemoveAlarm(info.alarmId)
+                    else startAlarmAlertAbnormalClearProcess(info, alarmCause)
                 }
             }
 
@@ -139,31 +120,22 @@ class CarelevoAlarmActionHandler @Inject constructor(
 
             AlarmCause.ALARM_UNKNOWN                               -> {
                 if (alarmType == AlarmType.WARNING) {
-                    if (isPatchConnected()) {
-                        startAlarmClearPatchDiscardProcess(info)
+                    if (alarmClearCoordinator.isPatchReachable()) {
+                        // Reachable: tell the patch to discard (via the queue), then abandon it locally.
+                        scope.launch {
+                            alarmClearCoordinator.discardOnAlarm(info)
+                            startAlarmClearPatchForceQuitProcess()
+                        }
                     } else {
+                        // Unreachable/faulty patch: abandon locally NOW — do not wait on the queue's
+                        // connect-loop (up to ~119s) while a critical warning keeps sounding.
                         startAlarmClearPatchForceQuitProcess()
                     }
-                } else {
-                    //startAlarmUpdateProcess()
                 }
             }
 
             else                                                   -> Unit
         }
-    }
-
-    fun startAlarmClearRequestProcess(info: CarelevoAlarmInfo) {
-        compositeDisposable += alarmClearRequestUseCase.execute(AlarmClearUseCaseRequest(alarmId = info.alarmId, alarmType = info.alarmType, alarmCause = info.cause))
-            .subscribeOn(aapsSchedulers.io)
-            .observeOn(aapsSchedulers.io)
-            .subscribe(
-                {
-                    aapsLogger.debug(LTag.PUMPCOMM, "acknowledgeAlarm.success alarmId=${info.alarmId}")
-                    acknowledgeAndRemoveAlarm(info.alarmId)
-                }, { e ->
-                    aapsLogger.error(LTag.PUMPCOMM, "acknowledgeAlarm.error alarmId=${info.alarmId} error=$e")
-                })
     }
 
     private fun startAlarmAlertAbnormalClearProcess(info: CarelevoAlarmInfo, alarmCause: AlarmCause) {
@@ -186,72 +158,8 @@ class CarelevoAlarmActionHandler @Inject constructor(
 
     }
 
-    private fun startAlarmClearPatchDiscardProcess(info: CarelevoAlarmInfo) {
-        compositeDisposable += alarmClearPatchDiscardUseCase.execute(AlarmClearUseCaseRequest(alarmId = info.alarmId, alarmType = info.alarmType, alarmCause = info.cause))
-            .subscribeOn(aapsSchedulers.io)
-            .observeOn(aapsSchedulers.io)
-            .subscribe(
-                {
-                    startAlarmClearPatchForceQuitProcess()
-                }, { e ->
-                    aapsLogger.error(LTag.PUMPCOMM, "clearPatchDiscard.error alarmId=${info.alarmId} error=$e")
-                })
-
-    }
-
-    private fun startInfusionResumeProcess(info: CarelevoAlarmInfo) {
-        compositeDisposable += carelevoPumpResumeUseCase.execute()
-            .timeout(30L, TimeUnit.SECONDS)
-            .observeOn(aapsSchedulers.io)
-            .subscribeOn(aapsSchedulers.io)
-            .doOnError {
-                aapsLogger.debug(LTag.PUMPCOMM, "doOnError called : $it")
-            }
-            .subscribe { response ->
-                when (response) {
-                    is ResponseResult.Success -> {
-                        aapsLogger.debug(LTag.PUMPCOMM, "response success")
-                        runBlocking {
-                            pumpSync.syncStopTemporaryBasalWithPumpId(
-                                timestamp = dateUtil.now(),
-                                endPumpId = dateUtil.now(),
-                                pumpType = PumpType.CAREMEDI_CARELEVO,
-                                pumpSerial = carelevoPatch.patchInfo.value?.getOrNull()?.manufactureNumber ?: ""
-                            )
-                        }
-                    }
-
-                    is ResponseResult.Failure -> {}
-
-                    is ResponseResult.Error   -> {
-                        aapsLogger.debug(LTag.PUMPCOMM, "response failed: ${response.e.message}")
-                    }
-                }
-            }
-
-    }
-
     private fun startAlarmClearPatchForceQuitProcess() {
-        val address = getConnectedAddress()
-        address?.let {
-            bleController.clearBond(it)
-            compositeDisposable += bleController.execute(Disconnect(address))
-                .subscribeOn(aapsSchedulers.io)
-                .observeOn(aapsSchedulers.io)
-                .subscribe(
-                    { result ->
-                        aapsLogger.debug(LTag.PUMPCOMM, "startAlarmClearPatchForceQuitProcess result=$result")
-                        bleController.unBondDevice()
-                        carelevoPatch.flushPatchInformation()
-                        clearAllAlarms()
-                    }, { e ->
-                        aapsLogger.error(LTag.PUMPCOMM, "startAlarmClearPatchForceQuitProcess.disconnectError error=$e")
-                    })
-        } ?: run {
-            bleController.unBondDevice()
-            carelevoPatch.flushPatchInformation()
-            clearAllAlarms()
-        }
+        alarmClearCoordinator.forceQuitTeardown { clearAllAlarms() }
     }
 
     fun acknowledgeAndRemoveAlarm(alarmId: String) {
