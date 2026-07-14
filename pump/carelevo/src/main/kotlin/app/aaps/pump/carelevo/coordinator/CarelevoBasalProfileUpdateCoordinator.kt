@@ -2,8 +2,6 @@ package app.aaps.pump.carelevo.coordinator
 
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
-import app.aaps.core.interfaces.notifications.NotificationId
-import app.aaps.core.interfaces.notifications.NotificationManager
 import app.aaps.core.interfaces.profile.Profile
 import app.aaps.core.interfaces.pump.PumpEnactResult
 import app.aaps.core.interfaces.resources.ResourceHelper
@@ -27,7 +25,6 @@ import kotlin.jvm.optionals.getOrNull
 class CarelevoBasalProfileUpdateCoordinator @Inject constructor(
     private val aapsLogger: AAPSLogger,
     private val rh: ResourceHelper,
-    private val notificationManager: NotificationManager,
     private val pumpEnactResultProvider: Provider<PumpEnactResult>,
     private val carelevoPatch: CarelevoPatch,
     private val setBasalProgramUseCase: CarelevoSetBasalProgramUseCase,
@@ -76,38 +73,26 @@ class CarelevoBasalProfileUpdateCoordinator @Inject constructor(
             .onErrorReturn { ResponseResult.Error(it) }
             .blockingGet()
 
+        // PROFILE_SET_OK / FAILED_UPDATE_PROFILE are now posted centrally by the CommandQueue from the
+        // returned success/enacted (success && enacted → PROFILE_SET_OK; !success → FAILED_UPDATE_PROFILE),
+        // unified across all pumps — do not post them here.
         return when (response) {
             is ResponseResult.Success -> {
                 aapsLogger.debug(LTag.PUMPCOMM, "execute.success")
                 onProfileUpdated(profile)
                 lastProfileUpdateAttemptMs = System.currentTimeMillis()
-                notificationManager.post(
-                    NotificationId.PROFILE_SET_OK,
-                    app.aaps.core.ui.R.string.profile_set_ok,
-                    validMinutes = 60
-                )
                 result.success(true).enacted(true)
             }
 
             is ResponseResult.Error   -> {
                 aapsLogger.error(LTag.PUMPCOMM, "execute.error error=${response.e}", response.e)
                 lastProfileUpdateAttemptMs = System.currentTimeMillis()
-                notificationManager.post(
-                    NotificationId.FAILED_UPDATE_PROFILE,
-                    app.aaps.core.ui.R.string.failed_update_basal_profile,
-                    validMinutes = 60
-                )
                 result.success(false).enacted(false)
             }
 
             is ResponseResult.Failure -> {
                 aapsLogger.error(LTag.PUMPCOMM, "execute.failure unknownResponse=$response")
                 lastProfileUpdateAttemptMs = System.currentTimeMillis()
-                notificationManager.post(
-                    NotificationId.FAILED_UPDATE_PROFILE,
-                    app.aaps.core.ui.R.string.failed_update_basal_profile,
-                    validMinutes = 60
-                )
                 result.success(false).enacted(false)
             }
         }

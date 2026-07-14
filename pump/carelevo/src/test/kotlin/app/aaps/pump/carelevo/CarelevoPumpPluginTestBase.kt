@@ -2,7 +2,6 @@ package app.aaps.pump.carelevo
 
 import android.content.Context
 import app.aaps.core.interfaces.logging.AAPSLogger
-import app.aaps.core.interfaces.notifications.NotificationManager
 import app.aaps.core.interfaces.profile.Profile
 import app.aaps.core.interfaces.profile.ProfileFunction
 import app.aaps.core.interfaces.protection.ProtectionCheck
@@ -87,7 +86,6 @@ abstract class CarelevoPumpPluginTestBase {
 
     @Mock lateinit var fabricPrivacy: FabricPrivacy
 
-    @Mock lateinit var notificationManager: NotificationManager
     @Mock lateinit var protectionCheck: ProtectionCheck
     @Mock lateinit var uiInteraction: UiInteraction
     @Mock lateinit var profileFunction: ProfileFunction
@@ -171,7 +169,6 @@ abstract class CarelevoPumpPluginTestBase {
         val basalProfileUpdateCoordinator = CarelevoBasalProfileUpdateCoordinator(
             aapsLogger = aapsLogger,
             rh = rh,
-            notificationManager = notificationManager,
             pumpEnactResultProvider = pumpEnactResultProvider,
             carelevoPatch = carelevoPatch,
             setBasalProgramUseCase = setBasalProgramUseCase,
@@ -225,7 +222,6 @@ abstract class CarelevoPumpPluginTestBase {
             rxBus = rxBus,
             sp = sp,
             fabricPrivacy = fabricPrivacy,
-            notificationManager = notificationManager,
             profileFunction = profileFunction,
             context = context,
             protectionCheck = protectionCheck,

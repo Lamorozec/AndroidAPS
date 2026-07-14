@@ -14,8 +14,6 @@ import app.aaps.core.data.pump.defs.PumpType
 import app.aaps.core.data.pump.defs.TimeChangeType
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
-import app.aaps.core.interfaces.notifications.NotificationId
-import app.aaps.core.interfaces.notifications.NotificationManager
 import app.aaps.core.interfaces.plugin.PluginDescription
 import app.aaps.core.interfaces.profile.Profile
 import app.aaps.core.interfaces.profile.ProfileFunction
@@ -108,7 +106,6 @@ class CarelevoPumpPlugin @Inject constructor(
     private val rxBus: RxBus,
     private val sp: SP,
     private val fabricPrivacy: FabricPrivacy,
-    private val notificationManager: NotificationManager,
     private val profileFunction: ProfileFunction,
     private val context: Context,
     private val protectionCheck: ProtectionCheck,
@@ -484,21 +481,24 @@ class CarelevoPumpPlugin @Inject constructor(
     }
 
     override suspend fun setNewBasalProfile(profile: PumpProfile): PumpEnactResult {
-        aapsLogger.debug(LTag.PUMP, "setNewBasalProfile timezoneOrDSTChanged called - ${carelevoPatch.resolvePatchState()}")
+        aapsLogger.debug(LTag.PUMP, "setNewBasalProfile called - ${carelevoPatch.resolvePatchState()}")
         _lastDataTime.value = System.currentTimeMillis()
+        // PROFILE_SET_OK / FAILED_UPDATE_PROFILE are posted centrally by the CommandQueue from the returned
+        // success/enacted (unified across pumps) — this method only returns the right values.
         val result = when (carelevoPatch.resolvePatchState()) {
-            is PatchState.ConnectedBooted -> {
-                updateBasalProfile(profile)
-            }
-
             is PatchState.NotConnectedNotBooting -> {
+                // No active patch yet — store the profile for when a patch is activated. A deferred write,
+                // not an actual change, so enacted=false (no PROFILE_SET_OK); success=true keeps the
+                // not-ready case out of the failure alarm (matches the other queue-managed pumps).
                 carelevoPatch.setProfile(profile)
-                notificationManager.post(NotificationId.PROFILE_SET_OK, app.aaps.core.ui.R.string.profile_set_ok, validMinutes = 60)
-                pumpEnactResultProvider.get().success(true).enacted(true)
+                pumpEnactResultProvider.get().success(true).enacted(false)
             }
 
             else -> {
-                pumpEnactResultProvider.get()
+                // Patch present. setNewBasalProfile runs on the queue worker AFTER the queue guaranteed a
+                // fully-connected link, so this is the live push path even if the cached patchState briefly
+                // reads NotConnectedBooted. updateBasalProfile returns the real success/enacted result.
+                updateBasalProfile(profile)
             }
         }
         aapsLogger.debug(LTag.PUMP, "result success=${result.success} enacted=${result.enacted} comment=${result.comment}")
