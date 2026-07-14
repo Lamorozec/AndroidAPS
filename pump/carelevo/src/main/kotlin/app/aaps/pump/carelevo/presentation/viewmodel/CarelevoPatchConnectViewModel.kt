@@ -381,6 +381,12 @@ class CarelevoPatchConnectViewModel @Inject constructor(
                         aapsLogger.debug(LTag.PUMPCOMM, "response success")
                         triggerEvent(CarelevoConnectPrepareEvent.ConnectComplete)
                         setUiState(UiState.Idle)
+                        // Pairing is complete. From the first CustomCommand onward the CommandQueue
+                        // (CarelevoConnectionCoordinator) is the sole connect/reconnect manager, so
+                        // tear down the wizard's off-queue btState connect observer here. Otherwise it
+                        // would re-fire connectNewPatch (a full re-pair) on every queue-driven reconnect
+                        // during later activation steps and contend with the queue.
+                        connectDisposable.clear()
                     }
 
                     is ResponseResult.Error   -> {

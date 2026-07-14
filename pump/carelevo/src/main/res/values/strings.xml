@@ -82,6 +82,7 @@
     <string name="key_carelevo_low_reservoir_reminders" translatable="false">carelevo_low_reservoir_reminders</string>
     <string name="carelevo_low_reservoir_reminders_title">Low Insulin Notification</string>
     <string name="carelevo_patch_buzzer_alarm_title">Patch Info Alarm</string>
+    <string name="carelevo_use_new_ble_stack_title">[Dev] Use new BLE stack (patch-info read)</string>
     <string name="carelevo_low_reservoir_reminders_title_value">Low Insulin Notification Setting</string>
     <string name="carelevo_patch_expiration_reminders_title_value">Patch Usage Notification Setting</string>
 
@@ -131,7 +132,7 @@
 
     <string name="carelevo_dialog_connect_detach_applicator_guide">
         Press the grips on both sides of the applicator to detach it from the patch,\n
-        and then press the <b>[Removal Complete]</b> button. Insulin delivery will begin.
+        and then press the `Applicator removed` button. Insulin delivery will begin.
     </string>
 
     <!-- Connection -->

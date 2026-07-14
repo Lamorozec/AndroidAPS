@@ -42,6 +42,7 @@ import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.keys.interfaces.withEntries
 import app.aaps.core.ui.compose.icons.IcPluginCarelevo
 import app.aaps.core.ui.compose.preference.PreferenceSubScreenDef
+import app.aaps.pump.carelevo.ble.CarelevoBleSession
 import app.aaps.pump.carelevo.ble.CarelevoBleSource
 import app.aaps.pump.carelevo.ble.data.BondingState.Companion.codeToBondingResult
 import app.aaps.pump.carelevo.ble.data.DeviceModuleState.Companion.codeToDeviceResult
@@ -79,6 +80,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -97,6 +99,10 @@ import javax.inject.Singleton
 import kotlin.jvm.optionals.getOrNull
 
 @Singleton
+// Settle window between dropping the legacy GATT and the new transport re-dialing the same device
+// (BLE stacks dislike an immediate reconnect to a just-closed peripheral). Phase-2.A validation only.
+private const val NEW_BLE_SETTLE_MS = 1000L
+
 class CarelevoPumpPlugin @Inject constructor(
     aapsLogger: AAPSLogger,
     rh: ResourceHelper,
@@ -152,6 +158,10 @@ class CarelevoPumpPlugin @Inject constructor(
     private var lifecycleObserver: LifecycleEventObserver? = null
 
     @Inject @Named("characterTx") lateinit var txUuid: UUID
+
+    // Phase-2 new BLE stack session (flag-gated hardware validation). Field-injected — its @Inject
+    // constructor holds no eager BLE state, so this is safe even when the flag is off.
+    @Inject lateinit var bleSession: CarelevoBleSession
 
     override suspend fun onStart() {
         super.onStart()
@@ -419,7 +429,8 @@ class CarelevoPumpPlugin @Inject constructor(
             CarelevoIntPreferenceKey.CARELEVO_PATCH_EXPIRATION_REMINDER_HOURS.withEntries(
                 (24..167 step 1).associateWith { "$it ${rh.gs(app.aaps.core.interfaces.R.string.hours)}" }
             ),
-            CarelevoBooleanPreferenceKey.CARELEVO_BUZZER_REMINDER
+            CarelevoBooleanPreferenceKey.CARELEVO_BUZZER_REMINDER,
+            CarelevoBooleanPreferenceKey.CARELEVO_USE_NEW_BLE_STACK
         ),
         icon = pluginDescription.icon
     )
@@ -475,9 +486,44 @@ class CarelevoPumpPlugin @Inject constructor(
     }
 
     override suspend fun getPumpStatus(reason: String) {
+        if (preferences.get(CarelevoBooleanPreferenceKey.CARELEVO_USE_NEW_BLE_STACK)) {
+            readPatchInfoViaNewStack()
+            _lastDataTime.value = System.currentTimeMillis()
+            return
+        }
         connectionCoordinator.refreshPumpStatus(
             onLastDataUpdated = { _lastDataTime.value = System.currentTimeMillis() }
         )
+    }
+
+    /**
+     * Phase-2.A hardware-validation read (flag-gated, engineering-only): drop the legacy link and read
+     * Patch Info (0x33 → 0x93+0x94) over the NEW [app.aaps.pump.carelevo.ble.BleClient] stack's own
+     * connection, logging the outcome. Safe against the CommandQueue: this runs on the QueueWorker
+     * thread while it is blocked inside this status read, so the worker cannot concurrently re-dial the
+     * legacy link — it only reconnects legacy after this returns, by which point the new session has
+     * closed. A clean OK log also answers the auth-on-reconnect question empirically (a fresh GATT that
+     * reads patch info without replaying app-auth ⇒ no re-auth needed). See `_docs/carelevo-new-ble-stack.md`.
+     */
+    private suspend fun readPatchInfoViaNewStack() {
+        val address = carelevoPatch.getPatchInfoAddress() ?: run {
+            aapsLogger.warn(LTag.PUMPCOMM, "newBle.readPatchInfo skipped: no patch address")
+            return
+        }
+        try {
+            // Own the link: drop the legacy GATT (and stop its reconnect) before the new transport
+            // dials the same device, then let the stack release the old client interface.
+            connectionCoordinator.disconnect("new-ble-session")
+            delay(NEW_BLE_SETTLE_MS)
+            val info = bleSession.readPatchInfo(address)
+            aapsLogger.info(
+                LTag.PUMPCOMM,
+                "newBle.readPatchInfo OK serial=${info.serialNumber} fw=${info.firmwareVersion} " +
+                    "model=${info.modelName} result1=${info.serialResultCode} result2=${info.detailResultCode}"
+            )
+        } catch (e: Throwable) {
+            aapsLogger.error(LTag.PUMPCOMM, "newBle.readPatchInfo FAILED", e)
+        }
     }
 
     override suspend fun setNewBasalProfile(profile: PumpProfile): PumpEnactResult {
