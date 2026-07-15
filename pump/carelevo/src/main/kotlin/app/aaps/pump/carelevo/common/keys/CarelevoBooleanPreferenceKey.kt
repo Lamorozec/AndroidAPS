@@ -41,13 +41,15 @@ enum class CarelevoBooleanPreferenceKey(
     ),
 
     /**
-     * Phase-2 rollout switch: route selected ops through the new coroutine [BleClient] stack
-     * (a whole-connection new-transport session) instead of the legacy Rx path. Engineering-mode
-     * only, default off → instant rollback with no rebuild. See `_docs/carelevo-new-ble-stack.md`.
+     * Phase-2 rollout switch: route delivery/activation/status ops through the new coroutine [BleClient]
+     * stack (a whole-connection new-transport session) instead of the legacy Rx path. **Default ON** now that
+     * the full stack is hardware-validated (reads + settings + suspend/resume + delivery D1-D3 + activation
+     * discard/safety/needle/set-basal). Flip OFF in engineering mode for the legacy fallback during soak;
+     * legacy + this flag are removed in Phase 2.D once soaked. See `_docs/carelevo-new-ble-stack.md`.
      */
     CARELEVO_USE_NEW_BLE_STACK(
         "carelevo_use_new_ble_stack",
-        false,
+        true,
         R.string.carelevo_use_new_ble_stack_title,
         engineeringModeOnly = true
     ),

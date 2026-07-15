@@ -115,7 +115,12 @@ class CarelevoBleSession @Inject constructor(
             val gatt = BleTransportGattConnection(transport, writeUuid, notifyUuid, scope)
             val client: BleClient = BleClientImpl(gatt, writeUuid, notifyUuid, scope)
             try {
-                open(gatt, mac)
+                // Bound the ENTIRE connect→discover→enable handshake, not just the CONNECTED wait: a lost
+                // CCCD-write callback (which the transport documents as "surfaced by the caller's withTimeout")
+                // would otherwise suspend forever HERE while holding sessionMutex, wedging every later new-stack
+                // op — including a delivery-critical out-of-band bolus cancel. On timeout the finally closes the
+                // gatt (aborting the pending ack) and releases the mutex.
+                withTimeout(CONNECT_TIMEOUT_MS) { open(gatt, mac) }
                 aapsLogger.debug(LTag.PUMPCOMM, "bleSession: reading $label")
                 withTimeout(timeoutMs) { block(client) }
             } finally {

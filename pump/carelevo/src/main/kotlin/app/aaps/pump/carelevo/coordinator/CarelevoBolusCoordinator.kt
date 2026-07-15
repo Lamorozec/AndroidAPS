@@ -38,6 +38,7 @@ import app.aaps.pump.carelevo.domain.usecase.bolus.model.StartImmeBolusInfusionR
 import app.aaps.pump.carelevo.domain.usecase.bolus.model.StartImmeBolusInfusionResponseModel
 import io.reactivex.rxjava3.disposables.CompositeDisposable
 import io.reactivex.rxjava3.kotlin.plusAssign
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.runBlocking
@@ -76,13 +77,21 @@ class CarelevoBolusCoordinator @Inject constructor(
         private const val PROGRESS_POLL_MS = 100L
         private const val RESULT_SUCCESS = 0
 
-        // Option A guard: max time the queue worker stays blocked after a STOPPED new-stack bolus, waiting for
-        // the out-of-band cancel session to confirm before it can re-dial legacy (avoids a two-GATT collision).
-        // A reachable patch settles in ~1-2 s; the bound only trips for an unreachable pump (self-limiting).
-        private const val CANCEL_WAIT_TIMEOUT_MS = 20_000L
+        // The out-of-band new-stack cancel opens a fresh GATT per attempt (unlike legacy, which reuses the open
+        // link), so cap retries low — a single bounded connect+write settles a reachable patch; more attempts
+        // only lengthen the two-GATT-collision window against an unreachable one (which can't be stopped anyway).
+        private const val NEW_STACK_CANCEL_MAX_RETRY = 1
+
+        // Backstop only: the guard normally releases the moment the cancel session finishes (via
+        // immeBolusCancelInFlight), not on this timer. Sized to comfortably exceed a bounded cancel span so the
+        // deadline never fires mid-attempt; it just prevents an unexpected hang from blocking the worker forever.
+        private const val CANCEL_WAIT_TIMEOUT_MS = 60_000L
     }
 
     @Volatile private var isImmeBolusStop = false
+    // True for the WHOLE out-of-band new-stack cancel span (across retries) — the delivery worker's guard blocks
+    // while this is set so it can't re-dial the legacy GATT while the cancel's GATT is open (two-GATT status-133).
+    @Volatile private var immeBolusCancelInFlight = false
     private var bolusExpectMs: Long = 0
     private val _lastBolusTime = MutableStateFlow<Long?>(null)
     val lastBolusTime: StateFlow<Long?> = _lastBolusTime
@@ -430,10 +439,16 @@ class CarelevoBolusCoordinator @Inject constructor(
     private fun awaitImmeBolusCancelIfStopped() {
         if (!bolusProgressData.isStopPressed || isImmeBolusStop) return
         val deadline = System.currentTimeMillis() + CANCEL_WAIT_TIMEOUT_MS
-        while (!isImmeBolusStop && System.currentTimeMillis() < deadline) {
+        // Block until the out-of-band cancel session has fully finished (its GATT closed) before freeing the
+        // worker. Exit on: confirmed cancel (isImmeBolusStop); OR the cancel ran and finished without confirming
+        // (engaged then cleared → gave up, so no GATT is open → safe); OR the backstop deadline.
+        var engaged = false
+        while (System.currentTimeMillis() < deadline) {
+            if (isImmeBolusStop) break
+            if (immeBolusCancelInFlight) engaged = true else if (engaged) break
             SystemClock.sleep(PROGRESS_POLL_MS)
         }
-        aapsLogger.info(LTag.PUMPCOMM, "newBle.deliverTreatment stop settled isImmeBolusStop=$isImmeBolusStop")
+        aapsLogger.info(LTag.PUMPCOMM, "newBle.deliverTreatment stop settled isImmeBolusStop=$isImmeBolusStop inFlight=$immeBolusCancelInFlight")
     }
 
     /**
@@ -442,52 +457,64 @@ class CarelevoBolusCoordinator @Inject constructor(
      * FRESH cancel session — the session mutex serializes it against any in-flight session (the start session
      * has already closed). Discrete `BolusCancelCommand` (0x2C→0x8C); on success record the pump-reported
      * partial `infusedAmount` ([PumpSync]) + delete/recompute persist + set [isImmeBolusStop] (which breaks the
-     * delivery loop). Retries a timed-out cancel up to a bolus-duration-derived bound. Mirrors
-     * [stopBolusDeliveringInternal].
+     * delivery loop). Retries ONLY a timed-out attempt (like [stopBolusDeliveringInternal]) up to a small
+     * [NEW_STACK_CANCEL_MAX_RETRY] — each new-stack attempt is a full fresh connect, unlike the legacy shared
+     * link, so more retries only lengthen the two-GATT window. [immeBolusCancelInFlight] spans the whole call so
+     * the delivery worker's guard blocks until the cancel's GATT is closed. Mirrors [stopBolusDeliveringInternal].
      */
     private fun cancelImmediateBolusViaNewStack(serialNumber: String, onLastDataUpdated: () -> Unit) {
-        val address = carelevoPatch.getPatchInfoAddress()
-        if (address == null) {
-            aapsLogger.error(LTag.PUMPCOMM, "newBle.cancelImmediateBolus no patch address")
-            return
-        }
-        val maxRetry = calculateMaxRetry(totalAllowedMs = bolusExpectMs).coerceAtLeast(0)
-        var attempt = 0
-        while (attempt <= maxRetry && !isImmeBolusStop) {
-            try {
-                val response = runBlocking { gateway.runSingle(address, BolusCancelCommand()) }
-                if (response.resultCode == RESULT_SUCCESS) {
-                    onLastDataUpdated()
-                    val infusedAmount = response.infusedAmount
-                    bolusProgressData.updateProgress(
-                        bolusProgressData.state.value?.percent ?: 100,
-                        rh.gs(app.aaps.core.interfaces.R.string.bolus_delivered_successfully, infusedAmount.toFloat()),
-                        PumpInsulin(infusedAmount)
-                    )
-                    cancelImmeBolusInfusionUseCase.persistImmeBolusCancelled()
-                    runBlocking {
-                        pumpSync.syncBolusWithPumpId(
-                            dateUtil.now(),
-                            PumpInsulin(infusedAmount),
-                            BS.Type.NORMAL,
-                            dateUtil.now(),
-                            PumpType.CAREMEDI_CARELEVO,
-                            serialNumber
+        immeBolusCancelInFlight = true
+        try {
+            val address = carelevoPatch.getPatchInfoAddress()
+            if (address == null) {
+                aapsLogger.error(LTag.PUMPCOMM, "newBle.cancelImmediateBolus no patch address")
+                return
+            }
+            val maxRetry = min(calculateMaxRetry(totalAllowedMs = bolusExpectMs).coerceAtLeast(0), NEW_STACK_CANCEL_MAX_RETRY)
+            var attempt = 0
+            while (attempt <= maxRetry && !isImmeBolusStop) {
+                try {
+                    val response = runBlocking { gateway.runSingle(address, BolusCancelCommand()) }
+                    if (response.resultCode == RESULT_SUCCESS) {
+                        onLastDataUpdated()
+                        val infusedAmount = response.infusedAmount
+                        bolusProgressData.updateProgress(
+                            bolusProgressData.state.value?.percent ?: 100,
+                            rh.gs(app.aaps.core.interfaces.R.string.bolus_delivered_successfully, infusedAmount.toFloat()),
+                            PumpInsulin(infusedAmount)
                         )
+                        cancelImmeBolusInfusionUseCase.persistImmeBolusCancelled()
+                        runBlocking {
+                            pumpSync.syncBolusWithPumpId(
+                                dateUtil.now(),
+                                PumpInsulin(infusedAmount),
+                                BS.Type.NORMAL,
+                                dateUtil.now(),
+                                PumpType.CAREMEDI_CARELEVO,
+                                serialNumber
+                            )
+                        }
+                        isImmeBolusStop = true
+                        aapsLogger.info(LTag.PUMPCOMM, "newBle.cancelImmediateBolus infused=$infusedAmount")
+                        return
                     }
-                    isImmeBolusStop = true
-                    aapsLogger.info(LTag.PUMPCOMM, "newBle.cancelImmediateBolus infused=$infusedAmount")
+                    aapsLogger.error(LTag.PUMPCOMM, "newBle.cancelImmediateBolus failed result=${response.resultCode}")
+                    return
+                } catch (e: TimeoutCancellationException) {
+                    // Only a timeout is worth another fresh-connect attempt (mirrors legacy's timeout-only retry).
+                    aapsLogger.error(LTag.PUMPCOMM, "newBle.cancelImmediateBolus timeout attempt=$attempt")
+                    attempt++
+                } catch (e: Exception) {
+                    // Any other failure (connect refused, BLE error): give up, like legacy — do not retry.
+                    aapsLogger.error(LTag.PUMPCOMM, "newBle.cancelImmediateBolus error=$e")
                     return
                 }
-                aapsLogger.error(LTag.PUMPCOMM, "newBle.cancelImmediateBolus failed result=${response.resultCode}")
-                return
-            } catch (e: Exception) {
-                aapsLogger.error(LTag.PUMPCOMM, "newBle.cancelImmediateBolus attempt=$attempt error=$e")
-                attempt++
             }
-        }
-        if (!isImmeBolusStop) {
-            aapsLogger.error(LTag.PUMPCOMM, "newBle.cancelImmediateBolus exhausted maxRetry=$maxRetry")
+            if (!isImmeBolusStop) {
+                aapsLogger.error(LTag.PUMPCOMM, "newBle.cancelImmediateBolus exhausted maxRetry=$maxRetry")
+            }
+        } finally {
+            immeBolusCancelInFlight = false
         }
     }
 
