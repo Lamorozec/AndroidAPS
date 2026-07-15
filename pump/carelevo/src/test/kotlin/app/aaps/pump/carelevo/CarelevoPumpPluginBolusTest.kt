@@ -1,16 +1,17 @@
 package app.aaps.pump.carelevo
 
 import app.aaps.core.interfaces.pump.DetailedBolusInfo
-import app.aaps.pump.carelevo.domain.model.ResponseResult
+import app.aaps.pump.carelevo.ble.commands.ExtendBolusCancelCommand
+import app.aaps.pump.carelevo.ble.commands.ExtendBolusCommand
+import app.aaps.pump.carelevo.ble.commands.ExtendBolusResponse
 import app.aaps.pump.carelevo.domain.model.infusion.CarelevoImmeBolusInfusionInfoDomainModel
 import app.aaps.pump.carelevo.domain.model.infusion.CarelevoInfusionInfoDomainModel
-import app.aaps.pump.carelevo.domain.model.result.ResultSuccess
 import com.google.common.truth.Truth.assertThat
-import io.reactivex.rxjava3.core.Single
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
 import org.mockito.kotlin.any
+import org.mockito.kotlin.isA
 import org.mockito.kotlin.whenever
 import java.util.Optional
 
@@ -55,8 +56,8 @@ class CarelevoPumpPluginBolusTest : CarelevoPumpPluginTestBase() {
     }
 
     @Test
-    fun `deliverTreatment should return not enacted when pump is disconnected`() {
-        whenever(carelevoPatch.isCarelevoConnected()).thenReturn(false)
+    fun `deliverTreatment should return not enacted when no patch address is stored`() {
+        whenever(carelevoPatch.getPatchInfoAddress()).thenReturn(null)
 
         val result = runBlocking {
             plugin.deliverTreatment(DetailedBolusInfo().apply {
@@ -66,6 +67,7 @@ class CarelevoPumpPluginBolusTest : CarelevoPumpPluginTestBase() {
         }
 
         assertThat(result.enacted).isFalse()
+        assertThat(result.bolusDelivered).isWithin(0.001).of(0.0)
     }
 
     @Test
@@ -97,11 +99,7 @@ class CarelevoPumpPluginBolusTest : CarelevoPumpPluginTestBase() {
     }
 
     @Test
-    fun `setExtendedBolus should succeed when use case succeeds`() {
-        whenever(startExtendBolusInfusionUseCase.execute(any())).thenReturn(
-            Single.just(ResponseResult.Success(ResultSuccess))
-        )
-
+    fun `setExtendedBolus should succeed when the pump accepts the command`() {
         val result = runBlocking { plugin.setExtendedBolus(insulin = 1.2, durationInMinutes = 30) }
 
         assertThat(result.success).isTrue()
@@ -109,10 +107,9 @@ class CarelevoPumpPluginBolusTest : CarelevoPumpPluginTestBase() {
     }
 
     @Test
-    fun `setExtendedBolus should fail when use case returns error`() {
-        whenever(startExtendBolusInfusionUseCase.execute(any())).thenReturn(
-            Single.just(ResponseResult.Error(IllegalStateException("failed")))
-        )
+    fun `setExtendedBolus should fail when the pump rejects the command`() {
+        whenever { bleSession.runSingle(any(), isA<ExtendBolusCommand>(), any()) }
+            .thenReturn(ExtendBolusResponse(resultCode = 1, expectedTimeSeconds = 0))
 
         val result = runBlocking { plugin.setExtendedBolus(insulin = 1.2, durationInMinutes = 30) }
 
@@ -121,11 +118,7 @@ class CarelevoPumpPluginBolusTest : CarelevoPumpPluginTestBase() {
     }
 
     @Test
-    fun `cancelExtendedBolus should succeed when use case succeeds`() {
-        whenever(cancelExtendBolusInfusionUseCase.execute()).thenReturn(
-            Single.just(ResponseResult.Success(ResultSuccess))
-        )
-
+    fun `cancelExtendedBolus should succeed when the pump accepts the command`() {
         val result = runBlocking { plugin.cancelExtendedBolus() }
 
         assertThat(result.success).isTrue()
@@ -134,10 +127,9 @@ class CarelevoPumpPluginBolusTest : CarelevoPumpPluginTestBase() {
     }
 
     @Test
-    fun `cancelExtendedBolus should fail when use case returns error`() {
-        whenever(cancelExtendBolusInfusionUseCase.execute()).thenReturn(
-            Single.just(ResponseResult.Error(IllegalStateException("failed")))
-        )
+    fun `cancelExtendedBolus should fail when the session throws`() {
+        whenever { bleSession.runSingle(any(), isA<ExtendBolusCancelCommand>(), any()) }
+            .thenAnswer { throw IllegalStateException("failed") }
 
         val result = runBlocking { plugin.cancelExtendedBolus() }
 

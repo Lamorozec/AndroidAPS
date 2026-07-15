@@ -79,10 +79,7 @@
     <string name="carelevo_connect_patch_attach_title">Apply Patch</string>
     <string name="carelevo_connect_needle_check_title">Insert Needle</string>
 
-    <string name="key_carelevo_low_reservoir_reminders" translatable="false">carelevo_low_reservoir_reminders</string>
-    <string name="carelevo_low_reservoir_reminders_title">Low Insulin Notification</string>
     <string name="carelevo_patch_buzzer_alarm_title">Patch Info Alarm</string>
-    <string name="carelevo_use_new_ble_stack_title">[Dev] Use new BLE stack (patch-info read)</string>
     <string name="carelevo_low_reservoir_reminders_title_value">Low Insulin Notification Setting</string>
     <string name="carelevo_patch_expiration_reminders_title_value">Patch Usage Notification Setting</string>
 

@@ -19,38 +19,6 @@ enum class CarelevoBooleanPreferenceKey(
     override val exportable: Boolean = true
 ) : BooleanPreferenceKey {
 
-    CARELEVO_PATCH_EXPIRATION_REMINDER_ENABLED(
-        "CARELEVO_PATCH_EXPIRATION_REMINDER_ENABLED",
-        true,
-        R.string.key_carelevo_low_reservoir_reminders
-    ),
-    CARELEVO_LOW_RESERVOIR_REMINDER_ENABLED(
-        "CARELEVO_LOW_RESERVOIR_REMINDER_ENABLED",
-        true,
-        R.string.carelevo_low_reservoir_reminders_title
-    ),
-    CARELEVO_BUZZER_REMINDER(
-        "CARELEVO_BUZZER_REMINDER",
-        false,
-        R.string.carelevo_patch_buzzer_alarm_title
-    ),
-    CARELEVO_CAGE_DEFAULT_APPLIED(
-        "carelevo_cage_default_applied",
-        false,
-        0
-    ),
-
-    /**
-     * Phase-2 rollout switch: route delivery/activation/status ops through the new coroutine [BleClient]
-     * stack (a whole-connection new-transport session) instead of the legacy Rx path. **Default ON** now that
-     * the full stack is hardware-validated (reads + settings + suspend/resume + delivery D1-D3 + activation
-     * discard/safety/needle/set-basal). Flip OFF in engineering mode for the legacy fallback during soak;
-     * legacy + this flag are removed in Phase 2.D once soaked. See `_docs/carelevo-new-ble-stack.md`.
-     */
-    CARELEVO_USE_NEW_BLE_STACK(
-        "carelevo_use_new_ble_stack",
-        true,
-        R.string.carelevo_use_new_ble_stack_title,
-        engineeringModeOnly = true
-    ),
+    CARELEVO_BUZZER_REMINDER(key = "CARELEVO_BUZZER_REMINDER", defaultValue = false, titleResId = R.string.carelevo_patch_buzzer_alarm_title),
+    CARELEVO_CAGE_DEFAULT_APPLIED(key = "carelevo_cage_default_applied", defaultValue = false, titleResId = 0),
 }

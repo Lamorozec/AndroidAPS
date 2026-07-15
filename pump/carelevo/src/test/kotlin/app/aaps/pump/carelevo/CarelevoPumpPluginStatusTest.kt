@@ -2,15 +2,13 @@ package app.aaps.pump.carelevo
 
 import app.aaps.core.data.pump.defs.TimeChangeType
 import app.aaps.pump.carelevo.command.CmdTimeZoneUpdate
-import app.aaps.pump.carelevo.domain.model.ResponseResult
-import app.aaps.pump.carelevo.domain.model.result.ResultSuccess
 import com.google.common.truth.Truth.assertThat
-import io.reactivex.rxjava3.core.Single
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
 import org.mockito.kotlin.any
 import org.mockito.kotlin.never
 import org.mockito.kotlin.verify
+import org.mockito.kotlin.verifyBlocking
 import org.mockito.kotlin.whenever
 
 class CarelevoPumpPluginStatusTest : CarelevoPumpPluginTestBase() {
@@ -37,33 +35,36 @@ class CarelevoPumpPluginStatusTest : CarelevoPumpPluginTestBase() {
     }
 
     @Test
-    fun `getPumpStatus should skip request when bluetooth is disabled`() {
-        whenever(carelevoPatch.isBluetoothEnabled()).thenReturn(false)
+    fun `getPumpStatus should skip the read when no patch address is stored`() {
+        whenever(carelevoPatch.getPatchInfoAddress()).thenReturn(null)
 
         runBlocking { plugin.getPumpStatus("test") }
 
-        verify(requestPatchInfusionInfoUseCase, never()).execute()
+        verifyBlocking(bleSession, never()) { readInfusionInfo(any()) }
     }
 
     @Test
-    fun `getPumpStatus should skip request when pump is disconnected`() {
-        whenever(carelevoPatch.isBluetoothEnabled()).thenReturn(true)
-        whenever(carelevoPatch.isCarelevoConnected()).thenReturn(false)
+    fun `getPumpStatus should swallow a session failure without throwing`() {
+        whenever { bleSession.readInfusionInfo(any()) }.thenAnswer { throw IllegalStateException("unreachable") }
 
         runBlocking { plugin.getPumpStatus("test") }
 
-        verify(requestPatchInfusionInfoUseCase, never()).execute()
+        verify(carelevoPatch, never()).applyInfusionInfoReport(any(), any(), any(), any(), any(), any())
     }
 
     @Test
-    fun `getPumpStatus should request infusion info when connected`() {
-        whenever(requestPatchInfusionInfoUseCase.execute()).thenReturn(
-            Single.just(ResponseResult.Success(ResultSuccess))
+    fun `getPumpStatus should read infusion info over the session and persist it`() {
+        runBlocking { plugin.getPumpStatus("test") }
+
+        verifyBlocking(bleSession) { readInfusionInfo(any()) }
+        verify(carelevoPatch).applyInfusionInfoReport(
+            runningMinutes = 100,
+            remains = 60.0,
+            infusedTotalBasalAmount = 1.0,
+            infusedTotalBolusAmount = 2.0,
+            pumpStateRaw = 0,
+            modeRaw = 1
         )
-
-        runBlocking { plugin.getPumpStatus("test") }
-
-        verify(requestPatchInfusionInfoUseCase).execute()
     }
 
     @Test

@@ -1,7 +1,7 @@
 package app.aaps.pump.carelevo
 
 import android.bluetooth.BluetoothAdapter
-import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.content.IntentFilter
 import androidx.lifecycle.Lifecycle
@@ -32,7 +32,6 @@ import app.aaps.core.interfaces.queue.CommandQueue
 import app.aaps.core.interfaces.queue.CustomCommand
 import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.rx.AapsSchedulers
-import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.sharedPreferences.SP
 import app.aaps.core.interfaces.ui.IconsProvider
 import app.aaps.core.interfaces.utils.fabric.FabricPrivacy
@@ -43,10 +42,13 @@ import app.aaps.core.keys.interfaces.withEntries
 import app.aaps.core.ui.compose.icons.IcPluginCarelevo
 import app.aaps.core.ui.compose.preference.PreferenceSubScreenDef
 import app.aaps.pump.carelevo.ble.CarelevoBleSession
-import app.aaps.pump.carelevo.ble.CarelevoBleSource
-import app.aaps.pump.carelevo.ble.data.BondingState.Companion.codeToBondingResult
+import app.aaps.pump.carelevo.ble.data.BleState
+import app.aaps.pump.carelevo.ble.data.BondingState
+import app.aaps.pump.carelevo.ble.data.DeviceModuleState
 import app.aaps.pump.carelevo.ble.data.DeviceModuleState.Companion.codeToDeviceResult
+import app.aaps.pump.carelevo.ble.data.NotificationState
 import app.aaps.pump.carelevo.ble.data.PeripheralConnectionState
+import app.aaps.pump.carelevo.ble.data.ServiceDiscoverState
 import app.aaps.pump.carelevo.command.CarelevoActivationExecutor
 import app.aaps.pump.carelevo.command.CmdTimeZoneUpdate
 import app.aaps.pump.carelevo.command.CmdUpdateBuzzer
@@ -65,7 +67,6 @@ import app.aaps.pump.carelevo.coordinator.CarelevoBolusCoordinator
 import app.aaps.pump.carelevo.coordinator.CarelevoConnectionCoordinator
 import app.aaps.pump.carelevo.coordinator.CarelevoSettingsCoordinator
 import app.aaps.pump.carelevo.coordinator.CarelevoTempBasalCoordinator
-import app.aaps.pump.carelevo.data.protocol.parser.CarelevoProtocolParserRegister
 import app.aaps.pump.carelevo.domain.model.alarm.CarelevoAlarmInfo
 import app.aaps.pump.carelevo.domain.model.infusion.CarelevoInfusionInfoDomainModel
 import app.aaps.pump.carelevo.domain.model.userSetting.CarelevoUserSettingInfoDomainModel
@@ -80,7 +81,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -90,26 +90,19 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
-import java.util.UUID
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
-import javax.inject.Named
 import javax.inject.Provider
 import javax.inject.Singleton
 import kotlin.jvm.optionals.getOrNull
 
 @Singleton
-// Settle window between dropping the legacy GATT and the new transport re-dialing the same device
-// (BLE stacks dislike an immediate reconnect to a just-closed peripheral). Phase-2.A validation only.
-private const val NEW_BLE_SETTLE_MS = 1000L
-
 class CarelevoPumpPlugin @Inject constructor(
     aapsLogger: AAPSLogger,
     rh: ResourceHelper,
     preferences: Preferences,
     commandQueue: CommandQueue,
     private val aapsSchedulers: AapsSchedulers,
-    private val rxBus: RxBus,
     private val sp: SP,
     private val fabricPrivacy: FabricPrivacy,
     private val profileFunction: ProfileFunction,
@@ -118,7 +111,6 @@ class CarelevoPumpPlugin @Inject constructor(
     private val blePreCheck: BlePreCheck,
     private val iconsProvider: IconsProvider,
     private var pumpEnactResultProvider: Provider<PumpEnactResult>,
-    private val carelevoProtocolParserRegister: CarelevoProtocolParserRegister,
     private val carelevoPatch: CarelevoPatch,
 
     private val carelevoAlarmNotifier: CarelevoAlarmNotifier,
@@ -157,10 +149,8 @@ class CarelevoPumpPlugin @Inject constructor(
     private var scope: CoroutineScope? = null
     private var lifecycleObserver: LifecycleEventObserver? = null
 
-    @Inject @Named("characterTx") lateinit var txUuid: UUID
-
-    // Phase-2 new BLE stack session (flag-gated hardware validation). Field-injected — its @Inject
-    // constructor holds no eager BLE state, so this is safe even when the flag is off.
+    // The coroutine BLE session every pump op runs over. Field-injected — its @Inject constructor
+    // holds no eager BLE state.
     @Inject lateinit var bleSession: CarelevoBleSession
 
     override suspend fun onStart() {
@@ -178,7 +168,6 @@ class CarelevoPumpPlugin @Inject constructor(
         aapsLogger.debug(LTag.PUMP, "onStop called")
         settingsCoordinator.clearUserSettings(pluginDisposable)
         pluginDisposable.clear()
-        connectionCoordinator.onStop()
 
         // onStart/onStop run as separate, unjoined pluginScope coroutines (PluginBase), so a fast
         // disable→re-enable can overlap them. Tear down only the generation captured here, and clear
@@ -283,22 +272,14 @@ class CarelevoPumpPlugin @Inject constructor(
         // onStart() is now a suspend function launched fire-and-forget, so the (non-replayed)
         // EventAppInitialized could fire before this subscription was registered — leaving the
         // patch uninitialized and appearing deactivated after an app update (dev fixed the same
-        // race in eopatch). Parser registration, initPatchOnce() and reconnection do not depend on
-        // other plugins; the basal profile is applied best-effort here and, if not yet available,
-        // is set later via the framework's setNewBasalProfile().
-        pluginDisposable += Completable.fromAction {
-            carelevoProtocolParserRegister.registerParser()
-        }
+        // race in eopatch). initPatchOnce() does not depend on other plugins; the basal profile is
+        // applied best-effort here and, if not yet available, is set later via setNewBasalProfile().
+        pluginDisposable += carelevoPatch.initPatchOnce()
             .subscribeOn(aapsSchedulers.io)
-            .doOnSubscribe { aapsLogger.debug(LTag.PUMPCOMM, "onStart: 1) parser registered start") }
-            .doOnComplete { aapsLogger.debug(LTag.PUMPCOMM, "onStart: 1) parser registered done") }
-            .andThen(
-                carelevoPatch.initPatchOnce()
-                    .timeout(5, TimeUnit.SECONDS)
-                    .onErrorComplete()
-                    .doOnSubscribe { aapsLogger.debug(LTag.PUMPCOMM, "onStart: 2) initPatchOnce waiting") }
-                    .doOnComplete { aapsLogger.debug(LTag.PUMPCOMM, "onStart: 2) initPatchOnce completed") }
-            )
+            .timeout(5, TimeUnit.SECONDS)
+            .onErrorComplete()
+            .doOnSubscribe { aapsLogger.debug(LTag.PUMPCOMM, "onStart: 1) initPatchOnce waiting") }
+            .doOnComplete { aapsLogger.debug(LTag.PUMPCOMM, "onStart: 1) initPatchOnce completed") }
             .andThen(
                 Completable.fromAction {
                     val profile = runBlocking { profileFunction.getProfile() }
@@ -326,48 +307,40 @@ class CarelevoPumpPlugin @Inject constructor(
     private fun registerBleReceiverIfNeeded() {
         if (bleReceiverDisposable?.isDisposed == false) return
 
+        // Seed the adapter state so isBluetoothEnabled()/patchState resolve before the first broadcast —
+        // the receiver is now the ONLY btState source (adapter on/off; there is no resting link to track).
+        carelevoPatch.onBluetoothStateChanged(currentAdapterBleState())
+
         bleReceiverDisposable = CarelevoObserveReceiver(context, createBluetoothIntentFilter())
             .subscribe { intent ->
                 aapsLogger.debug(LTag.PUMPBTCOMM, "CarelevoObserveReceiver called: ${intent.action}")
-                when (intent.action) {
-                    BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
-                        val bondState = intent.getIntExtra(
-                            BluetoothDevice.EXTRA_BOND_STATE,
-                            BluetoothDevice.ERROR
-                        )
-                        CarelevoBleSource.bluetoothState.value
-                            ?.copy(isBonded = bondState.codeToBondingResult())
-                            ?.let { CarelevoBleSource._bluetoothState.onNext(it) }
+                if (intent.action == BluetoothAdapter.ACTION_STATE_CHANGED) {
+                    val value = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+                    if (value in setOf(BluetoothAdapter.STATE_ON, BluetoothAdapter.STATE_OFF, BluetoothAdapter.STATE_TURNING_ON, BluetoothAdapter.STATE_TURNING_OFF)) {
+                        carelevoPatch.onBluetoothStateChanged(adapterBleState(value.codeToDeviceResult()))
                     }
-
-                    BluetoothAdapter.ACTION_STATE_CHANGED     -> {
-                        val value = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
-                        if (value in setOf(BluetoothAdapter.STATE_ON, BluetoothAdapter.STATE_OFF, BluetoothAdapter.STATE_TURNING_ON, BluetoothAdapter.STATE_TURNING_OFF)) {
-                            val isConnected = value == BluetoothAdapter.STATE_ON
-
-                            CarelevoBleSource._bluetoothState.value?.copy(
-                                isEnabled = value.codeToDeviceResult(),
-                                isConnected = if (isConnected) {
-                                    PeripheralConnectionState.CONN_STATE_NONE
-                                } else {
-                                    CarelevoBleSource._bluetoothState.value?.isConnected ?: PeripheralConnectionState.CONN_STATE_NONE
-                                },
-                            )?.let { CarelevoBleSource._bluetoothState.onNext(it) }
-                        }
-                    }
-
-                    BluetoothDevice.ACTION_ACL_CONNECTED      -> Unit
-
-                    BluetoothDevice.ACTION_ACL_DISCONNECTED   -> Unit
                 }
             }
 
         bleReceiverDisposable?.let { pluginDisposable.add(it) }
     }
 
+    private fun currentAdapterBleState(): BleState {
+        val enabled = (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter?.isEnabled == true
+        return adapterBleState(if (enabled) DeviceModuleState.DEVICE_STATE_ON else DeviceModuleState.DEVICE_STATE_OFF)
+    }
+
+    /** Adapter-level state only — bond/discovery/notification fields are per-session now and never tracked. */
+    private fun adapterBleState(enabled: DeviceModuleState): BleState = BleState(
+        isEnabled = enabled,
+        isBonded = BondingState.BOND_NONE,
+        isServiceDiscovered = ServiceDiscoverState.DISCOVER_STATE_NONE,
+        isConnected = PeripheralConnectionState.CONN_STATE_NONE,
+        isNotificationEnabled = NotificationState.NOTIFICATION_NONE
+    )
+
     private fun createBluetoothIntentFilter(): IntentFilter {
         return IntentFilter().apply {
-            addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
             addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
         }
     }
@@ -429,8 +402,7 @@ class CarelevoPumpPlugin @Inject constructor(
             CarelevoIntPreferenceKey.CARELEVO_PATCH_EXPIRATION_REMINDER_HOURS.withEntries(
                 (24..167 step 1).associateWith { "$it ${rh.gs(app.aaps.core.interfaces.R.string.hours)}" }
             ),
-            CarelevoBooleanPreferenceKey.CARELEVO_BUZZER_REMINDER,
-            CarelevoBooleanPreferenceKey.CARELEVO_USE_NEW_BLE_STACK
+            CarelevoBooleanPreferenceKey.CARELEVO_BUZZER_REMINDER
         ),
         icon = pluginDescription.icon
     )
@@ -447,7 +419,7 @@ class CarelevoPumpPlugin @Inject constructor(
     }
 
     override fun isSuspended(): Boolean {
-        // Real delivery-suspend (pump stopped by the user), NOT the BLE connection state. Otherwise a
+        // Real delivery-suspend (pump stopped by the user), NOT the BLE connection state. Otherwise, a
         // normal idle disconnect (NotConnectedBooted, now that disconnect() actually disconnects) would
         // be reported as suspended and surface as an error/suspended icon on the overview.
         return carelevoPatch.patchInfo.value?.getOrNull()?.isStopped ?: false
@@ -470,11 +442,7 @@ class CarelevoPumpPlugin @Inject constructor(
     }
 
     override fun connect(reason: String) {
-        connectionCoordinator.connect(
-            reason = reason,
-            txUuid = txUuid,
-            onLastDataUpdated = { _lastDataTime.value = System.currentTimeMillis() }
-        )
+        connectionCoordinator.connect(reason)
     }
 
     override fun disconnect(reason: String) {
@@ -485,36 +453,20 @@ class CarelevoPumpPlugin @Inject constructor(
         connectionCoordinator.stopConnecting()
     }
 
-    override suspend fun getPumpStatus(reason: String) {
-        if (preferences.get(CarelevoBooleanPreferenceKey.CARELEVO_USE_NEW_BLE_STACK)) {
-            readInfusionInfoViaNewStack()
-            return
-        }
-        connectionCoordinator.refreshPumpStatus(
-            onLastDataUpdated = { _lastDataTime.value = System.currentTimeMillis() }
-        )
-    }
+    override suspend fun getPumpStatus(reason: String) = readInfusionInfo()
 
     /**
-     * Phase-2.B status read over the NEW [app.aaps.pump.carelevo.ble.BleClient] stack (flag-gated,
-     * engineering-only): drop the legacy link, read Infusion Info (0x31 → 0x91) on the new transport's
-     * own connection, and persist it through the SAME seam the legacy `_patchEvent` path uses
-     * (`carelevoPatch.applyInfusionInfoReport`) — so this is a like-for-like replacement of the legacy
-     * `refreshPumpStatus` (reservoir/pump-state/totals all refresh), not a throwaway diagnostic. Safe
-     * against the CommandQueue: it runs on the QueueWorker thread while blocked inside this status read,
-     * so the worker cannot concurrently re-dial legacy — it only reconnects legacy after this returns,
-     * by which point the new session has closed. See `_docs/carelevo-new-ble-stack.md` (Phase 2).
+     * Status read over the [app.aaps.pump.carelevo.ble.BleClient] stack: read Infusion Info (0x31 → 0x91)
+     * on the session's own connection and persist it through the SAME seam the legacy `_patchEvent` path
+     * used (`carelevoPatch.applyInfusionInfoReport`) — reservoir/pump-state/totals all refresh. Runs on
+     * the QueueWorker thread, blocked inside this status read.
      */
-    private suspend fun readInfusionInfoViaNewStack() {
+    private suspend fun readInfusionInfo() {
         val address = carelevoPatch.getPatchInfoAddress() ?: run {
             aapsLogger.warn(LTag.PUMPCOMM, "newBle.readInfusionInfo skipped: no patch address")
             return
         }
         try {
-            // Own the link: drop the legacy GATT (and stop its reconnect) before the new transport
-            // dials the same device, then let the stack release the old client interface.
-            connectionCoordinator.disconnect("new-ble-session")
-            delay(NEW_BLE_SETTLE_MS)
             val info = bleSession.readInfusionInfo(address)
             carelevoPatch.applyInfusionInfoReport(
                 runningMinutes = info.runningMinutes,
@@ -549,7 +501,7 @@ class CarelevoPumpPlugin @Inject constructor(
                 pumpEnactResultProvider.get().success(true).enacted(false)
             }
 
-            else -> {
+            else                                 -> {
                 // Patch present. setNewBasalProfile runs on the queue worker AFTER the queue guaranteed a
                 // fully-connected link, so this is the live push path even if the cached patchState briefly
                 // reads NotConnectedBooted. updateBasalProfile returns the real success/enacted result.
@@ -623,8 +575,7 @@ class CarelevoPumpPlugin @Inject constructor(
     override fun stopBolusDelivering() {
         bolusCoordinator.cancelImmediateBolus(
             serialNumber = serialNumber(),
-            onLastDataUpdated = { _lastDataTime.value = System.currentTimeMillis() },
-            pluginDisposable = pluginDisposable
+            onLastDataUpdated = { _lastDataTime.value = System.currentTimeMillis() }
         )
     }
 

@@ -235,11 +235,11 @@ class CarelevoPatchSafetyCheckViewModel @Inject constructor(
 
     fun isSafetyCheckPassed() = carelevoPatch.patchInfo.value?.getOrNull()?.checkSafety == true
 
-    fun isConnected() = carelevoPatch.isCarelevoConnected()
+    // Per-op sessions leave no resting link: "connected" = a session can be attempted (patch paired + BT on).
+    fun isConnected() = carelevoPatch.getPatchInfoAddress() != null && carelevoPatch.isBluetoothEnabled()
 
     override fun onCleared() {
         compositeDisposable.clear()
-        super.onCleared()
     }
 
     fun onSafetyCheckComplete() {

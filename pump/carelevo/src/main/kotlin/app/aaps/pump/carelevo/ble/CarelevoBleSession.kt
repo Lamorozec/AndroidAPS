@@ -8,7 +8,6 @@ import app.aaps.pump.carelevo.ble.commands.BasalProgramCommand
 import app.aaps.pump.carelevo.ble.commands.InfusionInfoCommand
 import app.aaps.pump.carelevo.ble.commands.InfusionInfoResponse
 import app.aaps.pump.carelevo.ble.commands.MacAddressCommand
-import app.aaps.pump.carelevo.ble.commands.PatchInfoCommand
 import app.aaps.pump.carelevo.ble.commands.PatchInfoResponse
 import app.aaps.pump.carelevo.ble.commands.SafetyCheckCommand
 import app.aaps.pump.carelevo.ble.commands.SafetyCheckResponse
@@ -19,6 +18,7 @@ import app.aaps.pump.carelevo.ble.gatt.GattConnState
 import app.aaps.pump.carelevo.ble.gatt.GattEvent
 import app.aaps.pump.carelevo.ext.checkSumV2
 import app.aaps.pump.carelevo.ext.convertHexToByteArray
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -27,7 +27,6 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
@@ -39,6 +38,7 @@ import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Named
 import javax.inject.Singleton
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * Owns one full new-transport BLE session for the Phase-2 [BleClient] stack: connect → discover
@@ -69,16 +69,14 @@ class CarelevoBleSession @Inject constructor(
     // in-flight session to close and release before it opens — never a two-GATT status-133 collision.
     private val sessionMutex = Mutex()
 
-    /**
-     * Connect to [address], read Patch Info (0x33 → 0x93 RPT1 + 0x94 RPT2), and close.
-     *
-     * @throws IllegalArgumentException if the BLE stack refuses to start the connection.
-     * @throws kotlinx.coroutines.TimeoutCancellationException on connect-handshake or read timeout.
-     * Always closes the connection and cancels the session scope, even on failure.
-     */
-    /** Read Patch Info (0x33 → 0x93 RPT1 + 0x94 RPT2). */
-    suspend fun readPatchInfo(address: String): PatchInfoResponse =
-        withSession(address, "patch info") { it.requestMultiple(PatchInfoCommand()) }
+    // Test seam: the per-session scope dispatcher. Production always uses IO; tests inject a
+    // TestDispatcher so the event-router subscription and frame emissions are deterministically ordered
+    // (the events SharedFlow has no replay, so a frame emitted before the router subscribes is lost —
+    // impossible against real-radio latencies, but instant fake responses can hit it).
+    internal var sessionDispatcher: CoroutineDispatcher = Dispatchers.IO
+
+    // Wall-clock of the last session close, for the inter-session settle below.
+    @Volatile private var lastCloseAtMs = 0L
 
     /** Read Infusion Info (0x31 → 0x91) — the periodic status read (reservoir, totals, pump state). */
     suspend fun readInfusionInfo(address: String): InfusionInfoResponse =
@@ -117,7 +115,7 @@ class CarelevoBleSession @Inject constructor(
     /**
      * Pair a factory-fresh patch — the new-stack replacement for the legacy
      * `CarelevoConnectNewPatchUseCase` BLE sequence, all on ONE session: connect → **create the Android
-     * bond** ([ensureBond]; legacy `CarelevoBleMangerImpl` explicitly `createBond()`s after CONNECTED) →
+     * bond** (`ensureBond`; the legacy `CarelevoBleMangerImpl` explicitly called `createBond()` after CONNECTED) →
      * discover → enable notifications → MAC read (0x3B) → checksum app-auth (0x4B) → set-time→patch-info
      * rounds (0x11 → 0x93+0x94, retried while the serial is empty, mirroring the legacy 2-round loop) →
      * alert-alarm mode (0x48) → threshold bundle (0x1B). Persistence is NOT done here — the caller feeds
@@ -136,7 +134,7 @@ class CarelevoBleSession @Inject constructor(
 
             var patchInfo: PatchInfoResponse? = null
             for (round in 1..PATCH_INFO_ROUND_RETRY_COUNT) {
-                val info = withTimeoutOrNull(PATCH_INFO_ROUND_TIMEOUT_MS) {
+                val info = withTimeoutOrNull(PATCH_INFO_ROUND_TIMEOUT_MS.milliseconds) {
                     client.requestMultiple(SetTimeForPatchInfoCommand(subId = 0, volume = spec.volume, aidMode = 0, dateTime = DateTime.now()))
                 }
                 if (info != null && info.serialResultCode == RESULT_SUCCESS && info.serialNumber.trim().isNotEmpty() && info.detailResultCode == RESULT_SUCCESS) {
@@ -204,10 +202,15 @@ class CarelevoBleSession @Inject constructor(
         block: suspend (BleClient) -> R
     ): R =
         sessionMutex.withLock {
+            // Inter-session settle: give the patch time to fully release the previous link before the
+            // next dial. Back-to-back queue ops used to get this spacing for free from the legacy-link
+            // drop + settle dance; preserve the proven ~1 s gap conservatively.
+            val sinceCloseMs = System.currentTimeMillis() - lastCloseAtMs
+            if (sinceCloseMs in 0 until INTER_SESSION_SETTLE_MS) delay((INTER_SESSION_SETTLE_MS - sinceCloseMs).milliseconds)
             // BluetoothAdapter.getRemoteDevice requires an UPPERCASE MAC (lowercase throws
             // IllegalArgumentException); the stored address is lowercase, so normalize here.
             val mac = address.uppercase()
-            val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+            val scope = CoroutineScope(sessionDispatcher + SupervisorJob())
             val gatt = BleTransportGattConnection(transport, writeUuid, notifyUuid, scope)
             val client: BleClient = BleClientImpl(gatt, writeUuid, notifyUuid, scope)
             try {
@@ -217,12 +220,13 @@ class CarelevoBleSession @Inject constructor(
                 // op — including a delivery-critical out-of-band bolus cancel. On timeout the finally closes the
                 // gatt (aborting the pending ack) and releases the mutex.
                 val openTimeoutMs = if (ensureBond) CONNECT_TIMEOUT_MS + BOND_TIMEOUT_MS else CONNECT_TIMEOUT_MS
-                withTimeout(openTimeoutMs) { open(gatt, mac, ensureBond) }
+                withTimeout(openTimeoutMs.milliseconds) { open(gatt, mac, ensureBond) }
                 aapsLogger.debug(LTag.PUMPCOMM, "bleSession: reading $label")
-                withTimeout(timeoutMs) { block(client) }
+                withTimeout(timeoutMs.milliseconds) { block(client) }
             } finally {
                 gatt.close()
                 scope.cancel()
+                lastCloseAtMs = System.currentTimeMillis()
             }
         }
 
@@ -231,7 +235,7 @@ class CarelevoBleSession @Inject constructor(
         // ahead of our collector. UNDISPATCHED runs the async body up to the flow subscription
         // synchronously, guaranteeing the subscription is live before connect() fires.
         val connected = async(start = CoroutineStart.UNDISPATCHED) {
-            withTimeout(CONNECT_TIMEOUT_MS) {
+            withTimeout(CONNECT_TIMEOUT_MS.milliseconds) {
                 gatt.events
                     .filterIsInstance<GattEvent.ConnectionStateChanged>()
                     .first { it.state == GattConnState.CONNECTED }
@@ -245,8 +249,8 @@ class CarelevoBleSession @Inject constructor(
             // transport exposes no bond-state callback, so poll isDeviceBonded until the SMP completes.
             aapsLogger.debug(LTag.PUMPCOMM, "bleSession: creating bond")
             transport.adapter.createBond(address)
-            withTimeout(BOND_TIMEOUT_MS) {
-                while (!transport.adapter.isDeviceBonded(address)) delay(BOND_POLL_MS)
+            withTimeout(BOND_TIMEOUT_MS.milliseconds) {
+                while (!transport.adapter.isDeviceBonded(address)) delay(BOND_POLL_MS.milliseconds)
             }
             aapsLogger.debug(LTag.PUMPCOMM, "bleSession: bonded")
         }
@@ -278,5 +282,8 @@ class CarelevoBleSession @Inject constructor(
 
         // Legacy sends SetAlertAlarmModeRequest(0) during activation.
         private const val ALERT_ALARM_MODE_DEFAULT = 0
+
+        // Minimum gap between one session's close and the next session's connect (patch-side settle).
+        private const val INTER_SESSION_SETTLE_MS = 1000L
     }
 }

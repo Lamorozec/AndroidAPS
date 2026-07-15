@@ -36,13 +36,12 @@ class CarelevoPumpPluginTest : CarelevoPumpPluginTestBase() {
 
     @Test
     fun `isInitialized should stay true when BLE is disconnected`() {
-        // Activation-based (like Omnipod Dash / Medtrum): the queue idle-disconnects between commands,
-        // so a down link must NOT report the pump as un-initialized (that would abort the loop's
-        // TBR/SMB enact before a command can be queued to reconnect).
+        // Activation-based (like Omnipod Dash / Medtrum): per-op sessions mean there is no resting
+        // link, so a down link must NOT report the pump as un-initialized (that would abort the loop's
+        // TBR/SMB enact before a command can be queued).
         btStateSubject.onNext(Optional.empty())
 
-        assertThat(plugin.isConnected()).isFalse() // link really is down...
-        assertThat(plugin.isInitialized()).isTrue() // ...yet the pump is still initialized
+        assertThat(plugin.isInitialized()).isTrue()
     }
 
     @Test
@@ -65,16 +64,13 @@ class CarelevoPumpPluginTest : CarelevoPumpPluginTestBase() {
     }
 
     @Test
-    fun `isConnected should reflect the fully-ready BLE link when address exists`() {
+    fun `isConnected should always be true - each op opens its own session`() {
         patchInfoSubject.onNext(Optional.of(samplePatchInfo(address = "11:22:33:44:55:66")))
 
-        // Fully-ready link (default fixture) → connected.
-        btStateSubject.onNext(Optional.of(connectedBleState()))
-        assertThat(plugin.isConnected()).isTrue()
-
-        // Half-open / no link → NOT connected (strict: the queue must not run a command mid-reconnect).
+        // No resting link to report on: the queue must execute immediately and let the per-op
+        // session do (and fail) its own connect.
         btStateSubject.onNext(Optional.empty())
-        assertThat(plugin.isConnected()).isFalse()
+        assertThat(plugin.isConnected()).isTrue()
     }
 
     @Test

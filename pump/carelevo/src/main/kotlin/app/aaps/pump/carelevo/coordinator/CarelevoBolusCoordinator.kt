@@ -14,27 +14,23 @@ import app.aaps.core.interfaces.pump.PumpRate
 import app.aaps.core.interfaces.pump.PumpSync
 import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.rx.AapsSchedulers
-import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.utils.DateUtil
 import app.aaps.core.interfaces.utils.Round
-import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.pump.carelevo.R
-import app.aaps.pump.carelevo.ble.CarelevoNewStackGateway
+import app.aaps.pump.carelevo.ble.CarelevoBleSession
 import app.aaps.pump.carelevo.ble.commands.BolusCancelCommand
 import app.aaps.pump.carelevo.ble.commands.ExtendBolusCancelCommand
 import app.aaps.pump.carelevo.ble.commands.ExtendBolusCommand
 import app.aaps.pump.carelevo.ble.commands.ImmediateBolusCommand
 import app.aaps.pump.carelevo.common.CarelevoPatch
-import app.aaps.pump.carelevo.common.keys.CarelevoBooleanPreferenceKey
+import app.aaps.pump.carelevo.coordinator.CarelevoBolusCoordinator.Companion.CANCEL_WAIT_TIMEOUT_MS
+import app.aaps.pump.carelevo.coordinator.CarelevoBolusCoordinator.Companion.NEW_STACK_CANCEL_MAX_RETRY
 import app.aaps.pump.carelevo.domain.model.ResponseResult
 import app.aaps.pump.carelevo.domain.usecase.bolus.CarelevoCancelExtendBolusInfusionUseCase
 import app.aaps.pump.carelevo.domain.usecase.bolus.CarelevoCancelImmeBolusInfusionUseCase
 import app.aaps.pump.carelevo.domain.usecase.bolus.CarelevoFinishImmeBolusInfusionUseCase
 import app.aaps.pump.carelevo.domain.usecase.bolus.CarelevoStartExtendBolusInfusionUseCase
 import app.aaps.pump.carelevo.domain.usecase.bolus.CarelevoStartImmeBolusInfusionUseCase
-import app.aaps.pump.carelevo.domain.usecase.bolus.model.CancelBolusInfusionResponseModel
-import app.aaps.pump.carelevo.domain.usecase.bolus.model.StartExtendBolusInfusionRequestModel
-import app.aaps.pump.carelevo.domain.usecase.bolus.model.StartImmeBolusInfusionRequestModel
 import app.aaps.pump.carelevo.domain.usecase.bolus.model.StartImmeBolusInfusionResponseModel
 import io.reactivex.rxjava3.disposables.CompositeDisposable
 import io.reactivex.rxjava3.kotlin.plusAssign
@@ -58,12 +54,10 @@ class CarelevoBolusCoordinator @Inject constructor(
     private val dateUtil: DateUtil,
     private val bolusProgressData: BolusProgressData,
     private val pumpSync: PumpSync,
-    private val rxBus: RxBus,
     private val aapsSchedulers: AapsSchedulers,
     private val pumpEnactResultProvider: Provider<PumpEnactResult>,
     private val carelevoPatch: CarelevoPatch,
-    private val preferences: Preferences,
-    private val gateway: CarelevoNewStackGateway,
+    private val bleSession: CarelevoBleSession,
     private val startImmeBolusInfusionUseCase: CarelevoStartImmeBolusInfusionUseCase,
     private val finishImmeBolusInfusionUseCase: CarelevoFinishImmeBolusInfusionUseCase,
     private val cancelImmeBolusInfusionUseCase: CarelevoCancelImmeBolusInfusionUseCase,
@@ -89,6 +83,7 @@ class CarelevoBolusCoordinator @Inject constructor(
     }
 
     @Volatile private var isImmeBolusStop = false
+
     // True for the WHOLE out-of-band new-stack cancel span (across retries) — the delivery worker's guard blocks
     // while this is set so it can't re-dial the legacy GATT while the cancel's GATT is open (two-GATT status-133).
     @Volatile private var immeBolusCancelInFlight = false
@@ -113,9 +108,6 @@ class CarelevoBolusCoordinator @Inject constructor(
         if (!carelevoPatch.isBluetoothEnabled()) {
             return result
         }
-        if (!carelevoPatch.isCarelevoConnected()) {
-            return result
-        }
 
         val infusionInfo = carelevoPatch.infusionInfo.value?.getOrNull()
         aapsLogger.warn(
@@ -136,45 +128,13 @@ class CarelevoBolusCoordinator @Inject constructor(
         val actionId = (carelevoPatch.patchInfo.value?.getOrNull()?.bolusActionSeq ?: 0) + 1
         val normalizedActionId = if (actionId <= 0) 1 else ((actionId - 1) % 255) + 1
 
-        if (preferences.get(CarelevoBooleanPreferenceKey.CARELEVO_USE_NEW_BLE_STACK)) {
-            return deliverTreatmentViaNewStack(detailedBolusInfo, normalizedActionId, result, serialNumber, onLastDataUpdated, pluginDisposable)
-        }
-
-        return try {
-            startImmeBolusInfusionUseCase.execute(
-                StartImmeBolusInfusionRequestModel(
-                    actionSeq = normalizedActionId,
-                    volume = detailedBolusInfo.insulin
-                )
-            )
-                .timeout(30, TimeUnit.SECONDS)
-                .observeOn(aapsSchedulers.io)
-                .subscribeOn(aapsSchedulers.io)
-                .doOnSuccess { response -> handleBolusSuccess(response, detailedBolusInfo, result, serialNumber, onLastDataUpdated, pluginDisposable) }
-                .doOnError { e -> handleBolusError(e, result) }
-                .map { result }
-                .blockingGet()
-        } catch (e: Throwable) {
-            aapsLogger.error(LTag.PUMPCOMM, "deliverTreatment.exception error=$e")
-            result.success = false
-            result.enacted = false
-            result.bolusDelivered = 0.0
-            result
-        }
+        return deliverTreatmentInternal(detailedBolusInfo, normalizedActionId, result, serialNumber, onLastDataUpdated, pluginDisposable)
     }
 
     fun cancelImmediateBolus(
         serialNumber: String,
-        onLastDataUpdated: () -> Unit,
-        pluginDisposable: CompositeDisposable
-    ) {
-        if (preferences.get(CarelevoBooleanPreferenceKey.CARELEVO_USE_NEW_BLE_STACK)) {
-            cancelImmediateBolusViaNewStack(serialNumber, onLastDataUpdated)
-            return
-        }
-        val maxRetry = calculateMaxRetry(totalAllowedMs = bolusExpectMs)
-        stopBolusDeliveringInternal(retryCount = 0, maxRetry = maxRetry, serialNumber = serialNumber, onLastDataUpdated = onLastDataUpdated, pluginDisposable = pluginDisposable)
-    }
+        onLastDataUpdated: () -> Unit
+    ) = cancelImmediateBolusInternal(serialNumber, onLastDataUpdated)
 
     fun setExtendedBolus(
         insulin: Double,
@@ -183,49 +143,7 @@ class CarelevoBolusCoordinator @Inject constructor(
     ): PumpEnactResult {
         val result = pumpEnactResultProvider.get()
         if (!carelevoPatch.isBluetoothEnabled()) return result
-        if (!carelevoPatch.isCarelevoConnected()) return result
-        if (preferences.get(CarelevoBooleanPreferenceKey.CARELEVO_USE_NEW_BLE_STACK)) {
-            return setExtendedBolusViaNewStack(insulin, durationInMinutes, serialNumber)
-        }
-
-        val response = startExtendBolusInfusionUseCase.execute(
-            StartExtendBolusInfusionRequestModel(
-                volume = insulin,
-                minutes = durationInMinutes
-            )
-        ).subscribeOn(aapsSchedulers.io)
-            .timeout(3000L, TimeUnit.MILLISECONDS)
-            .onErrorReturn { e ->
-                aapsLogger.error(LTag.PUMPCOMM, "setExtendedBolus.error", e)
-                ResponseResult.Error(e)
-            }
-            .blockingGet()
-
-        return when (response) {
-            is ResponseResult.Success -> {
-                runBlocking {
-                    pumpSync.syncExtendedBolusWithPumpId(
-                        timestamp = dateUtil.now(),
-                        rate = PumpRate(insulin),
-                        duration = T.mins(durationInMinutes.toLong()).msecs(),
-                        isEmulatingTB = false,
-                        pumpId = dateUtil.now(),
-                        pumpType = PumpType.CAREMEDI_CARELEVO,
-                        pumpSerial = serialNumber
-                    )
-                }
-
-                result.success = true
-                result.enacted = true
-                result
-            }
-
-            else                      -> {
-                result.success = false
-                result.enacted = false
-                result
-            }
-        }
+        return setExtendedBolusInternal(insulin, durationInMinutes, serialNumber)
     }
 
     fun cancelExtendedBolus(
@@ -234,55 +152,16 @@ class CarelevoBolusCoordinator @Inject constructor(
     ): PumpEnactResult {
         val result = pumpEnactResultProvider.get()
         if (!carelevoPatch.isBluetoothEnabled()) return result
-        if (!carelevoPatch.isCarelevoConnected()) return result
-        if (preferences.get(CarelevoBooleanPreferenceKey.CARELEVO_USE_NEW_BLE_STACK)) {
-            return cancelExtendedBolusViaNewStack(serialNumber, onLastDataUpdated)
-        }
-
-        val response = cancelExtendBolusInfusionUseCase.execute()
-            .subscribeOn(aapsSchedulers.io)
-            .timeout(3000L, TimeUnit.MILLISECONDS)
-            .onErrorReturn { e ->
-                aapsLogger.error(LTag.PUMPCOMM, "cancelExtendedBolus.error", e)
-                ResponseResult.Error(e)
-            }
-            .blockingGet()
-
-        return when (response) {
-            is ResponseResult.Success -> {
-                aapsLogger.debug(LTag.PUMPCOMM, "cancelExtendedBolus.success")
-                onLastDataUpdated()
-                runBlocking {
-                    pumpSync.syncStopExtendedBolusWithPumpId(
-                        timestamp = dateUtil.now(),
-                        endPumpId = dateUtil.now(),
-                        pumpType = PumpType.CAREMEDI_CARELEVO,
-                        pumpSerial = serialNumber
-                    )
-                }
-
-                result.success = true
-                result.enacted = true
-                result.isTempCancel = true
-                result
-            }
-
-            else                      -> {
-                result.success = false
-                result.enacted = false
-                result
-            }
-        }
+        return cancelExtendedBolusInternal(serialNumber, onLastDataUpdated)
     }
 
     /**
-     * Phase-2 set-extended-bolus over the new stack (flag-gated, **delivery-critical**). Discrete
-     * `ExtendBolusCommand` (0x25→0x85) via the border gateway — **`immediateDose` is always 0.0** (pure
-     * extended, matching legacy; a non-zero value injects an unintended upfront dose). On `resultCode==0`
-     * reuse the use case's `mode=5` persist → then the same `pumpSync.syncExtendedBolusWithPumpId`. Mirrors
-     * [setExtendedBolus].
+     * Set-extended-bolus core (**delivery-critical**). Discrete `ExtendBolusCommand` (0x25→0x85) on the
+     * session — **`immediateDose` is always 0.0** (pure extended, matching legacy; a non-zero value
+     * injects an unintended upfront dose). On `resultCode==0` reuse the use case's `mode=5` persist → then
+     * `pumpSync.syncExtendedBolusWithPumpId`.
      */
-    private fun setExtendedBolusViaNewStack(
+    private fun setExtendedBolusInternal(
         insulin: Double,
         durationInMinutes: Int,
         serialNumber: String
@@ -294,7 +173,7 @@ class CarelevoBolusCoordinator @Inject constructor(
         val min = durationInMinutes % 60
         val speed = insulin / (durationInMinutes.toDouble() / 60)
         return try {
-            val response = runBlocking { gateway.runSingle(address, ExtendBolusCommand(immediateDose = 0.0, extendedSpeed = speed, hour = hour, min = min)) }
+            val response = runBlocking { bleSession.runSingle(address, ExtendBolusCommand(immediateDose = 0.0, extendedSpeed = speed, hour = hour, min = min)) }
             val success = response.resultCode == RESULT_SUCCESS
             val persisted = success && startExtendBolusInfusionUseCase.persistExtendBolusStarted(volume = insulin, speed = speed, minutes = durationInMinutes)
             aapsLogger.info(LTag.PUMPCOMM, "newBle.setExtendedBolus insulin=$insulin result=${response.resultCode} persisted=$persisted")
@@ -327,12 +206,12 @@ class CarelevoBolusCoordinator @Inject constructor(
     }
 
     /**
-     * Phase-2 cancel-extended-bolus over the new stack (flag-gated). Discrete `ExtendBolusCancelCommand`
-     * (0x29→0x89, response carries `infusedAmount`) via the border gateway → delete + recompute-mode persist →
-     * `pumpSync.syncStopExtendedBolusWithPumpId`. `infusedAmount` is logged only (legacy does not reconcile it
-     * into the DB). Mirrors [cancelExtendedBolus].
+     * Cancel-extended-bolus core. Discrete `ExtendBolusCancelCommand` (0x29→0x89, response carries
+     * `infusedAmount`) on the session → delete + recompute-mode persist →
+     * `pumpSync.syncStopExtendedBolusWithPumpId`. `infusedAmount` is logged only (legacy did not reconcile
+     * it into the DB).
      */
-    private fun cancelExtendedBolusViaNewStack(
+    private fun cancelExtendedBolusInternal(
         serialNumber: String,
         onLastDataUpdated: () -> Unit
     ): PumpEnactResult {
@@ -340,7 +219,7 @@ class CarelevoBolusCoordinator @Inject constructor(
         val address = carelevoPatch.getPatchInfoAddress()
             ?: return result.success(false).enacted(false).comment("no patch address")
         return try {
-            val response = runBlocking { gateway.runSingle(address, ExtendBolusCancelCommand()) }
+            val response = runBlocking { bleSession.runSingle(address, ExtendBolusCancelCommand()) }
             val success = response.resultCode == RESULT_SUCCESS
             val persisted = success && cancelExtendBolusInfusionUseCase.persistExtendBolusCancelled()
             aapsLogger.info(LTag.PUMPCOMM, "newBle.cancelExtendedBolus result=${response.resultCode} infused=${response.infusedAmount} persisted=$persisted")
@@ -372,14 +251,13 @@ class CarelevoBolusCoordinator @Inject constructor(
     }
 
     /**
-     * Phase-2 immediate bolus over the new stack (flag-gated, **delivery-critical**, Option A). Discrete
-     * `ImmediateBolusCommand` (0x24→0x84, `actionId` echoed as a stricter correlation guard) via the border
-     * gateway; on `resultCode==0` persist the start (`mode=3`) then reuse the EXISTING synthetic progress loop
-     * ([handleBolusSuccess]) with a synthesized success response — the pump sends no progress/completion
-     * frames, so the loop needs no BLE and runs after the start session has already closed. Mirrors
-     * [deliverTreatment].
+     * Immediate-bolus core (**delivery-critical**, Option A). Discrete `ImmediateBolusCommand` (0x24→0x84,
+     * `actionId` echoed as a stricter correlation guard) on the session; on `resultCode==0` persist
+     * the start (`mode=3`) then run the synthetic progress loop ([handleBolusSuccess]) with a synthesized
+     * success response — the pump sends no progress/completion frames, so the loop needs no BLE and runs
+     * after the start session has already closed.
      */
-    private fun deliverTreatmentViaNewStack(
+    private fun deliverTreatmentInternal(
         detailedBolusInfo: DetailedBolusInfo,
         actionId: Int,
         result: PumpEnactResult,
@@ -395,7 +273,7 @@ class CarelevoBolusCoordinator @Inject constructor(
             return result.comment("no patch address")
         }
         return try {
-            val response = runBlocking { gateway.runSingle(address, ImmediateBolusCommand(actionId, detailedBolusInfo.insulin)) }
+            val response = runBlocking { bleSession.runSingle(address, ImmediateBolusCommand(actionId, detailedBolusInfo.insulin)) }
             if (response.resultCode != RESULT_SUCCESS) {
                 aapsLogger.error(LTag.PUMPCOMM, "newBle.deliverTreatment start failed result=${response.resultCode}")
                 result.success = false
@@ -410,7 +288,7 @@ class CarelevoBolusCoordinator @Inject constructor(
                 result.bolusDelivered = 0.0
                 return result.comment("Internal error")
             }
-            aapsLogger.info(LTag.PUMPCOMM, "newBle.deliverTreatment start insulin=${detailedBolusInfo.insulin} result=${response.resultCode} expectSec=${response.expectedCompletionSeconds}")
+            aapsLogger.info(LTag.PUMPCOMM, "ble.deliverTreatment start insulin=${detailedBolusInfo.insulin} expectSec=${response.expectedCompletionSeconds}")
             // Start session has closed; run the synthetic progress loop with NO link (Option A) by reusing the
             // exact legacy loop via handleBolusSuccess with a synthesized success response.
             handleBolusSuccess(
@@ -452,17 +330,17 @@ class CarelevoBolusCoordinator @Inject constructor(
     }
 
     /**
-     * Phase-2 immediate-bolus cancel over the new stack (flag-gated, Option A). Stop arrives OUT-OF-BAND (off
-     * the queue worker, via `cancelAllBoluses`) while the delivery loop runs with no link, so this opens a
-     * FRESH cancel session — the session mutex serializes it against any in-flight session (the start session
-     * has already closed). Discrete `BolusCancelCommand` (0x2C→0x8C); on success record the pump-reported
-     * partial `infusedAmount` ([PumpSync]) + delete/recompute persist + set [isImmeBolusStop] (which breaks the
-     * delivery loop). Retries ONLY a timed-out attempt (like [stopBolusDeliveringInternal]) up to a small
-     * [NEW_STACK_CANCEL_MAX_RETRY] — each new-stack attempt is a full fresh connect, unlike the legacy shared
-     * link, so more retries only lengthen the two-GATT window. [immeBolusCancelInFlight] spans the whole call so
-     * the delivery worker's guard blocks until the cancel's GATT is closed. Mirrors [stopBolusDeliveringInternal].
+     * Immediate-bolus cancel core (Option A). Stop arrives OUT-OF-BAND (off the queue worker, via
+     * `cancelAllBoluses`) while the delivery loop runs with no link, so this opens a FRESH cancel session —
+     * the session mutex serializes it against any in-flight session (the start session has already closed).
+     * Discrete `BolusCancelCommand` (0x2C→0x8C); on success record the pump-reported partial
+     * `infusedAmount` ([PumpSync]) + delete/recompute persist + set [isImmeBolusStop] (which breaks the
+     * delivery loop). Retries ONLY a timed-out attempt up to a small [NEW_STACK_CANCEL_MAX_RETRY] — each
+     * attempt is a full fresh connect, so more retries only lengthen the two-GATT window.
+     * [immeBolusCancelInFlight] spans the whole call so the delivery worker's guard blocks until the
+     * cancel's GATT is closed.
      */
-    private fun cancelImmediateBolusViaNewStack(serialNumber: String, onLastDataUpdated: () -> Unit) {
+    private fun cancelImmediateBolusInternal(serialNumber: String, onLastDataUpdated: () -> Unit) {
         immeBolusCancelInFlight = true
         try {
             val address = carelevoPatch.getPatchInfoAddress()
@@ -474,7 +352,7 @@ class CarelevoBolusCoordinator @Inject constructor(
             var attempt = 0
             while (attempt <= maxRetry && !isImmeBolusStop) {
                 try {
-                    val response = runBlocking { gateway.runSingle(address, BolusCancelCommand()) }
+                    val response = runBlocking { bleSession.runSingle(address, BolusCancelCommand()) }
                     if (response.resultCode == RESULT_SUCCESS) {
                         onLastDataUpdated()
                         val infusedAmount = response.infusedAmount
@@ -500,7 +378,7 @@ class CarelevoBolusCoordinator @Inject constructor(
                     }
                     aapsLogger.error(LTag.PUMPCOMM, "newBle.cancelImmediateBolus failed result=${response.resultCode}")
                     return
-                } catch (e: TimeoutCancellationException) {
+                } catch (_: TimeoutCancellationException) {
                     // Only a timeout is worth another fresh-connect attempt (mirrors legacy's timeout-only retry).
                     aapsLogger.error(LTag.PUMPCOMM, "newBle.cancelImmediateBolus timeout attempt=$attempt")
                     attempt++
@@ -530,7 +408,6 @@ class CarelevoBolusCoordinator @Inject constructor(
             val message = when (response) {
                 is ResponseResult.Failure -> response.message
                 is ResponseResult.Error   -> response.e.message ?: response.e.toString()
-                else                      -> "Unknown bolus response"
             }
             aapsLogger.error(LTag.PUMPCOMM, "deliverTreatment.nonSuccess response=$response")
             result.success = false
@@ -670,79 +547,5 @@ class CarelevoBolusCoordinator @Inject constructor(
             return 3
         }
         return ((totalAllowedMs + timeoutMs - 1) / timeoutMs).toInt() - 1
-    }
-
-    private fun stopBolusDeliveringInternal(
-        retryCount: Int,
-        maxRetry: Int = 3,
-        serialNumber: String,
-        onLastDataUpdated: () -> Unit,
-        pluginDisposable: CompositeDisposable
-    ) {
-        aapsLogger.debug(
-            LTag.PUMPCOMM,
-            "stopBolus.start retry=$retryCount maxRetry=$maxRetry"
-        )
-
-        pluginDisposable += cancelImmeBolusInfusionUseCase.execute()
-            .subscribeOn(aapsSchedulers.io)
-            .observeOn(aapsSchedulers.io)
-            .timeout(STOP_BOLUS_TIME_OUT, TimeUnit.MILLISECONDS)
-            .subscribe(
-                { response ->
-                    when (response) {
-                        is ResponseResult.Success -> {
-                            onLastDataUpdated()
-                            val cancelResult = response.data as CancelBolusInfusionResponseModel
-                            aapsLogger.debug(LTag.PUMPCOMM, "stopBolus.success result=$cancelResult")
-                            bolusProgressData.updateProgress(
-                                bolusProgressData.state.value?.percent ?: 100,
-                                rh.gs(
-                                    app.aaps.core.interfaces.R.string.bolus_delivered_successfully,
-                                    cancelResult.infusedAmount.toFloat()
-                                ),
-                                PumpInsulin(cancelResult.infusedAmount)
-                            )
-                            runBlocking {
-                                pumpSync.syncBolusWithPumpId(
-                                    dateUtil.now(),
-                                    PumpInsulin(cancelResult.infusedAmount),
-                                    BS.Type.NORMAL,
-                                    dateUtil.now(),
-                                    PumpType.CAREMEDI_CARELEVO,
-                                    serialNumber
-                                )
-                            }
-                            isImmeBolusStop = true
-                        }
-
-                        is ResponseResult.Error   -> {
-                            aapsLogger.error(LTag.PUMPCOMM, "stopBolus.responseError error=${response.e}")
-                        }
-
-                        else                      -> {
-                            aapsLogger.error(LTag.PUMPCOMM, "stopBolus.failure")
-                        }
-                    }
-                },
-                { throwable ->
-                    if (throwable is TimeoutException) {
-                        aapsLogger.error(LTag.PUMPCOMM, "stopBolus.timeout timeoutMs=$STOP_BOLUS_TIME_OUT retry=$retryCount")
-                        if (retryCount < maxRetry) {
-                            stopBolusDeliveringInternal(
-                                retryCount = retryCount + 1,
-                                maxRetry = maxRetry,
-                                serialNumber = serialNumber,
-                                onLastDataUpdated = onLastDataUpdated,
-                                pluginDisposable = pluginDisposable
-                            )
-                        } else {
-                            aapsLogger.error(LTag.PUMPCOMM, "stopBolus.timeout.exhausted maxRetry=$maxRetry")
-                        }
-                    } else {
-                        aapsLogger.error(LTag.PUMPCOMM, "stopBolus.error error=$throwable")
-                    }
-                }
-            )
     }
 }

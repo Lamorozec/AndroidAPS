@@ -1,15 +1,7 @@
 package app.aaps.pump.carelevo.di
 
-import android.content.Context
-import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.pump.carelevo.ble.CarelevoBleTransport
 import app.aaps.pump.carelevo.ble.CarelevoBleTransportImpl
-import app.aaps.pump.carelevo.ble.core.CarelevoBleController
-import app.aaps.pump.carelevo.ble.core.CarelevoBleControllerImpl
-import app.aaps.pump.carelevo.ble.core.CarelevoBleManager
-import app.aaps.pump.carelevo.ble.core.CarelevoBleMangerImpl
-import app.aaps.pump.carelevo.ble.data.BleParams
-import app.aaps.pump.carelevo.ble.data.ConfigParams
 import app.aaps.pump.carelevo.config.BleEnvConfig
 import dagger.Module
 import dagger.Provides
@@ -39,50 +31,13 @@ class CarelevoBleModule {
     @Named("characterRx")
     internal fun provideRxCharacteristicUuid(): UUID = UUID.fromString(BleEnvConfig.BLE_RX_CHAR_UUID)
 
-    @Provides
-    internal fun provideConfigParams() = ConfigParams(isForeground = true)
-
-    @Provides
-    internal fun provideBleParams(
-        @Named("cccDescriptor") cccd: UUID,
-        @Named("serviceUuid") serviceUuid: UUID,
-        @Named("characterTx") tx: UUID,
-        @Named("characterRx") rx: UUID
-    ) = BleParams(cccd, serviceUuid, tx, rx)
-
     /**
-     * Shared-fleet [BleTransport][app.aaps.core.interfaces.pump.ble.BleTransport] for CareLevo.
-     * The new coroutine stack ([app.aaps.pump.carelevo.ble.BleClient] via
+     * Shared-fleet [app.aaps.core.interfaces.pump.ble.BleTransport] for CareLevo.
+     * The coroutine stack ([app.aaps.pump.carelevo.ble.BleClient] via
      * [app.aaps.pump.carelevo.ble.gatt.BleTransportGattConnection]) runs on this; a future
      * emulator impl can be swapped in here. See `_docs/carelevo-new-ble-stack.md`.
      */
     @Provides
     @Singleton
     internal fun provideCarelevoBleTransport(impl: CarelevoBleTransportImpl): CarelevoBleTransport = impl
-
-    @Provides
-    @Singleton
-    internal fun provideCarelevoBleManager(
-        context: Context,
-        param: BleParams,
-        aapsLogger: AAPSLogger
-    ): CarelevoBleManager {
-        return CarelevoBleMangerImpl(
-            context,
-            param,
-            aapsLogger
-        )
-    }
-
-    @Provides
-    @Singleton
-    internal fun provideCarelevoBleController(
-        param: BleParams,
-        btManager: CarelevoBleManager
-    ): CarelevoBleController {
-        return CarelevoBleControllerImpl(
-            param,
-            btManager
-        )
-    }
 }

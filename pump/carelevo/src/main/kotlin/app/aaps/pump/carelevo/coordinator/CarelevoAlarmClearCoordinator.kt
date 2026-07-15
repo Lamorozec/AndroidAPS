@@ -5,17 +5,13 @@ import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
 import app.aaps.core.interfaces.pump.PumpSync
 import app.aaps.core.interfaces.queue.CommandQueue
-import app.aaps.core.interfaces.rx.AapsSchedulers
 import app.aaps.core.interfaces.utils.DateUtil
-import app.aaps.pump.carelevo.ble.core.CarelevoBleController
-import app.aaps.pump.carelevo.ble.core.Disconnect
+import app.aaps.pump.carelevo.ble.CarelevoBleTransport
 import app.aaps.pump.carelevo.command.CmdAlarmClear
 import app.aaps.pump.carelevo.command.CmdAlarmClearPatchDiscard
 import app.aaps.pump.carelevo.command.CmdPumpResume
 import app.aaps.pump.carelevo.common.CarelevoPatch
 import app.aaps.pump.carelevo.domain.model.alarm.CarelevoAlarmInfo
-import io.reactivex.rxjava3.disposables.CompositeDisposable
-import io.reactivex.rxjava3.kotlin.plusAssign
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
@@ -33,15 +29,12 @@ import kotlin.jvm.optionals.getOrNull
 @Singleton
 class CarelevoAlarmClearCoordinator @Inject constructor(
     private val aapsLogger: AAPSLogger,
-    private val aapsSchedulers: AapsSchedulers,
     private val commandQueue: CommandQueue,
     private val carelevoPatch: CarelevoPatch,
-    private val bleController: CarelevoBleController,
+    private val transport: CarelevoBleTransport,
     private val pumpSync: PumpSync,
     private val dateUtil: DateUtil
 ) {
-
-    private val disposables = CompositeDisposable()
 
     // Serialize the queue ops across BOTH surfaces (this is a @Singleton): CommandQueue.customCommand dedups
     // by command CLASS and returns success=false if one of the same class is already in-flight, so two
@@ -61,11 +54,14 @@ class CarelevoAlarmClearCoordinator @Inject constructor(
     }
 
     /**
-     * Is the patch reachable on a live link right now? Used by the patch-ABANDON paths (serious warning
-     * discard) to decide between a graceful queue discard and an immediate local force-quit — abandoning a
-     * genuinely unreachable/faulty patch must not wait on the queue's connect-loop (up to ~119s).
+     * Can a discard op plausibly reach the patch? Used by the patch-ABANDON paths (serious warning
+     * discard) to decide between a graceful queue discard and an immediate local force-quit. With
+     * per-op sessions there is no resting link to inspect — "reachable" means a session can be
+     * attempted at all (patch paired + Bluetooth on); a genuinely dead patch then fails the bounded
+     * session connect (~20 s) and falls to force-quit.
      */
-    fun isPatchReachable(): Boolean = carelevoPatch.isCarelevoConnected()
+    fun isPatchReachable(): Boolean =
+        carelevoPatch.getPatchInfoAddress() != null && carelevoPatch.isBluetoothEnabled()
 
     /** Resume infusion after an auto-suspend alarm; syncs the TBR-cancel to NS on success. */
     suspend fun resumeInfusion(): Boolean = opMutex.withLock {
@@ -83,33 +79,17 @@ class CarelevoAlarmClearCoordinator @Inject constructor(
 
     /**
      * Last-resort LOCAL teardown when the patch is being abandoned (patch-discard alarm, or the patch is
-     * genuinely unreachable): drop the link + clear the bond + flush local patch state. Deliberately NOT
-     * queued — it is a one-way abandon, not a command that should reconnect. [onComplete] (the caller's
-     * alarm-queue clear) runs AFTER unbond+flush — and runs even if the disconnect errors — so the local
-     * alarm queue is only cleared once the patch state has actually been flushed (no re-populate window,
-     * no alarms dismissed while the bond/patch was never torn down).
+     * genuinely unreachable): clear the bond + flush local patch state. Deliberately NOT queued — it is a
+     * one-way abandon (no resting link exists to drop). [onComplete] (the caller's alarm-queue clear)
+     * runs AFTER unbond+flush — and runs even if the unbond errors — so the local alarm queue is only
+     * cleared once the patch state has actually been flushed.
      */
     fun forceQuitTeardown(onComplete: () -> Unit) {
-        val address = carelevoPatch.getPatchInfoAddress()
-        if (address == null) {
-            finishForceQuit(onComplete)
-            return
+        try {
+            carelevoPatch.getPatchInfoAddress()?.let { transport.adapter.removeBond(it.uppercase()) }
+        } catch (e: Exception) {
+            aapsLogger.error(LTag.PUMPCOMM, "forceQuitTeardown.unbondError", e)
         }
-        bleController.clearBond(address)
-        disposables += bleController.execute(Disconnect(address))
-            .subscribeOn(aapsSchedulers.io)
-            .observeOn(aapsSchedulers.io)
-            .subscribe(
-                { finishForceQuit(onComplete) },
-                { e ->
-                    aapsLogger.error(LTag.PUMPCOMM, "forceQuitTeardown.disconnectError error=$e")
-                    finishForceQuit(onComplete)
-                }
-            )
-    }
-
-    private fun finishForceQuit(onComplete: () -> Unit) {
-        bleController.unBondDevice()
         carelevoPatch.flushPatchInformation()
         onComplete()
     }

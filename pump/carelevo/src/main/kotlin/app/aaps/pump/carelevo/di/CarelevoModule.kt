@@ -13,7 +13,6 @@ import dagger.multibindings.IntoMap
 @Module(
     includes = [
         CarelevoBleModule::class,
-        CarelevoProtocolParserModule::class,
         CarelevoDataSourceModule::class,
         CarelevoDaoModule::class,
         CarelevoManagerModule::class,

@@ -1,14 +1,14 @@
 package app.aaps.pump.carelevo
 
 import app.aaps.core.interfaces.pump.PumpSync
-import app.aaps.pump.carelevo.domain.model.ResponseResult
-import app.aaps.pump.carelevo.domain.model.result.ResultSuccess
+import app.aaps.pump.carelevo.ble.commands.SimpleResultResponse
+import app.aaps.pump.carelevo.ble.commands.TempBasalCancelCommand
+import app.aaps.pump.carelevo.ble.commands.TempBasalCommand
 import com.google.common.truth.Truth.assertThat
-import io.reactivex.rxjava3.core.Single
 import kotlinx.coroutines.runBlocking
-import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
 import org.mockito.kotlin.any
+import org.mockito.kotlin.isA
 import org.mockito.kotlin.whenever
 
 class CarelevoPumpPluginTempBasalTest : CarelevoPumpPluginTestBase() {
@@ -23,8 +23,8 @@ class CarelevoPumpPluginTempBasalTest : CarelevoPumpPluginTestBase() {
     }
 
     @Test
-    fun `setTempBasalAbsolute should return not enacted when pump is disconnected`() {
-        whenever(carelevoPatch.isCarelevoConnected()).thenReturn(false)
+    fun `setTempBasalAbsolute should return not enacted when no patch address is stored`() {
+        whenever(carelevoPatch.getPatchInfoAddress()).thenReturn(null)
 
         val result = runBlocking { plugin.setTempBasalAbsolute(1.2, 30, false, PumpSync.TemporaryBasalType.NORMAL) }
 
@@ -33,10 +33,6 @@ class CarelevoPumpPluginTempBasalTest : CarelevoPumpPluginTestBase() {
 
     @Test
     fun `setTempBasalAbsolute should succeed on success response`() {
-        whenever(startTempBasalInfusionUseCase.execute(any())).thenReturn(
-            Single.just(ResponseResult.Success(ResultSuccess))
-        )
-
         val result = runBlocking { plugin.setTempBasalAbsolute(1.2, 30, false, PumpSync.TemporaryBasalType.NORMAL) }
 
         assertThat(result.success).isTrue()
@@ -45,10 +41,9 @@ class CarelevoPumpPluginTempBasalTest : CarelevoPumpPluginTestBase() {
     }
 
     @Test
-    fun `setTempBasalAbsolute should fail on error response`() {
-        whenever(startTempBasalInfusionUseCase.execute(any())).thenReturn(
-            Single.just(ResponseResult.Error(IllegalStateException("failed")))
-        )
+    fun `setTempBasalAbsolute should fail when the pump rejects the command`() {
+        whenever { bleSession.runSingle(any(), isA<TempBasalCommand>(), any()) }
+            .thenReturn(SimpleResultResponse(1))
 
         val result = runBlocking { plugin.setTempBasalAbsolute(1.2, 30, false, PumpSync.TemporaryBasalType.NORMAL) }
 
@@ -58,10 +53,6 @@ class CarelevoPumpPluginTempBasalTest : CarelevoPumpPluginTestBase() {
 
     @Test
     fun `setTempBasalPercent should succeed on success response`() {
-        whenever(startTempBasalInfusionUseCase.execute(any())).thenReturn(
-            Single.just(ResponseResult.Success(ResultSuccess))
-        )
-
         val result = runBlocking { plugin.setTempBasalPercent(150, 30, false, PumpSync.TemporaryBasalType.NORMAL) }
 
         assertThat(result.success).isTrue()
@@ -70,19 +61,21 @@ class CarelevoPumpPluginTempBasalTest : CarelevoPumpPluginTestBase() {
     }
 
     @Test
-    fun `setTempBasalPercent should fail when use case errors`() {
-        whenever(startTempBasalInfusionUseCase.execute(any())).thenReturn(
-            Single.error(IllegalStateException("timeout"))
-        )
+    fun `setTempBasalPercent should fail when the session throws`() {
+        // Legacy propagated the raw exception out of the plugin; the session path catches and maps it
+        // to a failed PumpEnactResult (deliberate improvement — a BLE error must not crash the queue).
+        whenever { bleSession.runSingle(any(), isA<TempBasalCommand>(), any()) }
+            .thenAnswer { throw IllegalStateException("timeout") }
 
-        assertThrows(IllegalStateException::class.java) {
-            runBlocking { plugin.setTempBasalPercent(150, 30, false, PumpSync.TemporaryBasalType.NORMAL) }
-        }
+        val result = runBlocking { plugin.setTempBasalPercent(150, 30, false, PumpSync.TemporaryBasalType.NORMAL) }
+
+        assertThat(result.success).isFalse()
+        assertThat(result.enacted).isFalse()
     }
 
     @Test
-    fun `cancelTempBasal should return not enacted when disconnected`() {
-        whenever(carelevoPatch.isCarelevoConnected()).thenReturn(false)
+    fun `cancelTempBasal should return not enacted when no patch address is stored`() {
+        whenever(carelevoPatch.getPatchInfoAddress()).thenReturn(null)
 
         val result = runBlocking { plugin.cancelTempBasal(false) }
 
@@ -91,10 +84,6 @@ class CarelevoPumpPluginTempBasalTest : CarelevoPumpPluginTestBase() {
 
     @Test
     fun `cancelTempBasal should succeed on success response`() {
-        whenever(cancelTempBasalInfusionUseCase.execute()).thenReturn(
-            Single.just(ResponseResult.Success(ResultSuccess))
-        )
-
         val result = runBlocking { plugin.cancelTempBasal(false) }
 
         assertThat(result.success).isTrue()
@@ -104,9 +93,8 @@ class CarelevoPumpPluginTempBasalTest : CarelevoPumpPluginTestBase() {
 
     @Test
     fun `cancelTempBasal should return success false and enacted false on timeout`() {
-        whenever(cancelTempBasalInfusionUseCase.execute()).thenReturn(
-            Single.error(IllegalStateException("timeout"))
-        )
+        whenever { bleSession.runSingle(any(), isA<TempBasalCancelCommand>(), any()) }
+            .thenAnswer { throw IllegalStateException("timeout") }
 
         val result = runBlocking { plugin.cancelTempBasal(false) }
 

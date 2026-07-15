@@ -12,30 +12,18 @@ import app.aaps.core.interfaces.rx.events.EventRefreshOverview
 import app.aaps.core.interfaces.sharedPreferences.SP
 import app.aaps.core.keys.DoubleKey
 import app.aaps.core.keys.interfaces.Preferences
-import app.aaps.pump.carelevo.ble.CarelevoBleSource
-import app.aaps.pump.carelevo.ble.core.CarelevoBleController
+import app.aaps.pump.carelevo.ble.CarelevoBleTransport
 import app.aaps.pump.carelevo.ble.data.BleState
-import app.aaps.pump.carelevo.ble.data.CommandResult
 import app.aaps.pump.carelevo.ble.data.DeviceModuleState
 import app.aaps.pump.carelevo.ble.data.isAvailable
-import app.aaps.pump.carelevo.ble.data.isPeripheralConnected
 import app.aaps.pump.carelevo.common.keys.CarelevoIntPreferenceKey
 import app.aaps.pump.carelevo.common.model.PatchState
-import app.aaps.pump.carelevo.domain.CarelevoPatchObserver
 import app.aaps.pump.carelevo.domain.model.ResponseResult
 import app.aaps.pump.carelevo.domain.model.alarm.CarelevoAlarmInfo
-import app.aaps.pump.carelevo.domain.model.bt.AlertReportResultModel
-import app.aaps.pump.carelevo.domain.model.bt.BasalInfusionResumeResultModel
-import app.aaps.pump.carelevo.domain.model.bt.FinishPulseReportResultModel
-import app.aaps.pump.carelevo.domain.model.bt.InfusionInfoReportResultModel
 import app.aaps.pump.carelevo.domain.model.bt.InfusionModeResult.Companion.codeToInfusionModeCommand
 import app.aaps.pump.carelevo.domain.model.bt.InfusionModeResult.Companion.commandToCode
-import app.aaps.pump.carelevo.domain.model.bt.NoticeReportResultModel
-import app.aaps.pump.carelevo.domain.model.bt.PatchResultModel
 import app.aaps.pump.carelevo.domain.model.bt.PumpStateResult.Companion.codeToPumpStateCommand
 import app.aaps.pump.carelevo.domain.model.bt.PumpStateResult.Companion.commandToCode
-import app.aaps.pump.carelevo.domain.model.bt.RetrieveOperationInfoResultModel
-import app.aaps.pump.carelevo.domain.model.bt.WarningReportResultModel
 import app.aaps.pump.carelevo.domain.model.infusion.CarelevoInfusionInfoDomainModel
 import app.aaps.pump.carelevo.domain.model.patch.CarelevoPatchInfoDomainModel
 import app.aaps.pump.carelevo.domain.model.userSetting.CarelevoUserSettingInfoDomainModel
@@ -44,8 +32,6 @@ import app.aaps.pump.carelevo.domain.usecase.alarm.CarelevoAlarmInfoUseCase
 import app.aaps.pump.carelevo.domain.usecase.infusion.CarelevoInfusionInfoMonitorUseCase
 import app.aaps.pump.carelevo.domain.usecase.patch.CarelevoPatchInfoMonitorUseCase
 import app.aaps.pump.carelevo.domain.usecase.patch.CarelevoPatchRptInfusionInfoProcessUseCase
-import app.aaps.pump.carelevo.domain.usecase.patch.CarelevoRequestPatchInfusionInfoUseCase
-import app.aaps.pump.carelevo.domain.usecase.patch.model.CarelevoPatchRptInfusionInfoDefaultRequestModel
 import app.aaps.pump.carelevo.domain.usecase.patch.model.CarelevoPatchRptInfusionInfoRequestModel
 import app.aaps.pump.carelevo.domain.usecase.userSetting.CarelevoCreateUserSettingInfoUseCase
 import app.aaps.pump.carelevo.domain.usecase.userSetting.CarelevoUserSettingInfoMonitorUseCase
@@ -54,7 +40,6 @@ import io.reactivex.rxjava3.core.Completable
 import io.reactivex.rxjava3.core.Single
 import io.reactivex.rxjava3.disposables.CompositeDisposable
 import io.reactivex.rxjava3.kotlin.plusAssign
-import io.reactivex.rxjava3.schedulers.Schedulers
 import io.reactivex.rxjava3.subjects.BehaviorSubject
 import java.time.LocalDateTime
 import java.util.Optional
@@ -66,8 +51,7 @@ import kotlin.math.abs
 import kotlin.math.min
 
 class CarelevoPatch @Inject constructor(
-    private val bleController: CarelevoBleController,
-    private val patchObserver: CarelevoPatchObserver,
+    private val transport: CarelevoBleTransport,
     private val aapsSchedulers: AapsSchedulers,
     private val rxBus: RxBus,
     private val sp: SP,
@@ -78,8 +62,7 @@ class CarelevoPatch @Inject constructor(
     private val userSettingInfoMonitorUseCase: CarelevoUserSettingInfoMonitorUseCase,
     private val patchRptInfusionInfoProcessUseCase: CarelevoPatchRptInfusionInfoProcessUseCase,
     private val createUserSettingInfoUseCase: CarelevoCreateUserSettingInfoUseCase,
-    private val carelevoAlarmInfoUseCase: CarelevoAlarmInfoUseCase,
-    private val requestPatchInfusionInfoUseCase: CarelevoRequestPatchInfusionInfoUseCase
+    private val carelevoAlarmInfoUseCase: CarelevoAlarmInfoUseCase
 ) {
 
     private val bleDisposable = CompositeDisposable()
@@ -94,12 +77,6 @@ class CarelevoPatch @Inject constructor(
 
     private val _patchState: BehaviorSubject<Optional<PatchState>> = BehaviorSubject.create()
     val patchState get() = _patchState
-
-    private val _isConnected: BehaviorSubject<Boolean> = BehaviorSubject.createDefault(false)
-    val isConnected get() = _isConnected
-
-    private val _connectedAddress: BehaviorSubject<Optional<String>> = BehaviorSubject.create()
-    val connectedAddress get() = _connectedAddress
 
     private val _patchInfo: BehaviorSubject<Optional<CarelevoPatchInfoDomainModel>> = BehaviorSubject.create()
     val patchInfo get() = _patchInfo
@@ -133,9 +110,7 @@ class CarelevoPatch @Inject constructor(
     fun initPatch() {
         if (!isWorking) {
             observePatchInfo()
-            observeBleState()
             observeChangeState()
-            observePatch()
             observeInfusionInfo()
             observeUserSettingInfo()
             _isWorking = true
@@ -165,27 +140,24 @@ class CarelevoPatch @Inject constructor(
         c
     }
 
-    fun isCarelevoConnected(): Boolean {
-        val address = connectedAddress.value?.getOrNull()
-        val isConnected = isConnected.value ?: false
-        val validAddress = patchInfo.value?.getOrNull()?.address
-
-        return address != null && validAddress != null && isConnected && address.equals(validAddress, ignoreCase = true)
-    }
-
     fun getPatchInfoAddress(): String? {
         return patchInfo.value?.getOrNull()?.address
     }
 
+    /**
+     * Per-op sessions leave no resting link to observe, so "connected" collapses to patch validity:
+     * an activated patch with Bluetooth available is operational ([PatchState.ConnectedBooted] — every
+     * op dials its own session on demand), an activated patch with Bluetooth off is
+     * [PatchState.NotConnectedBooted], and no patch is [PatchState.NotConnectedNotBooting].
+     */
     fun resolvePatchState(): PatchState {
-        val isPatchValid = patchInfo.value?.getOrNull()?.let { true } ?: false
-        val isPeripheralConnected = btState.value?.getOrNull()?.isPeripheralConnected() ?: false
+        val isPatchValid = patchInfo.value?.getOrNull() != null
+        val btAvailable = btState.value?.getOrNull()?.isAvailable() ?: false
 
         return when {
-            isPeripheralConnected && isPatchValid  -> PatchState.ConnectedBooted
-            isPeripheralConnected && !isPatchValid -> PatchState.NotConnectedNotBooting
-            !isPeripheralConnected && isPatchValid -> PatchState.NotConnectedBooted
-            else                                   -> PatchState.NotConnectedNotBooting
+            !isPatchValid -> PatchState.NotConnectedNotBooting
+            btAvailable   -> PatchState.ConnectedBooted
+            else          -> PatchState.NotConnectedBooted
         }
     }
 
@@ -194,24 +166,10 @@ class CarelevoPatch @Inject constructor(
         bleDisposable += BehaviorSubject.combineLatest(
             btState,
             patchInfo
-        ) { btState, _ ->
-            val btAvailable = btState.getOrNull()?.isAvailable()
-            val btPeripheralConnected = btState.getOrNull()?.isPeripheralConnected()
-
-            aapsLogger.debug(LTag.PUMPCOMM, "btAvailable : $btAvailable")
-            aapsLogger.debug(LTag.PUMPCOMM, "btPeripheralConnected : $btPeripheralConnected")
-
-            var result = resolvePatchState()
-            if (result == PatchState.ConnectedBooted) {
-                if (btAvailable == false) {
-                    result = PatchState.NotConnectedBooted
-                }
-            }
-
+        ) { _, _ ->
+            val result = resolvePatchState()
             aapsLogger.debug(LTag.PUMPCOMM, "result : $result")
 
-            _isConnected.onNext(btPeripheralConnected ?: false)
-            _connectedAddress.onNext(Optional.ofNullable(bleController.getConnectedAddress()))
             _patchState.onNext(Optional.ofNullable(result))
 
             when (result) {
@@ -297,23 +255,19 @@ class CarelevoPatch @Inject constructor(
         }
     }
 
-    private fun observeBleState() {
-        bleDisposable += CarelevoBleSource.bluetoothState
-            .observeOn(aapsSchedulers.io)
-            .distinctUntilChanged()
-            .subscribe { state ->
-                aapsLogger.debug(LTag.PUMPCOMM, "state : $state")
-                if (state.isEnabled == DeviceModuleState.DEVICE_STATE_OFF) {
-                    if (lastBtState != null && lastBtState?.isEnabled != DeviceModuleState.DEVICE_STATE_OFF) {
-                        bleController.checkGatt()
-                        bleController.clearOnlyGatt()
-                        handleAlarm("alert", value = null, cause = AlarmCause.ALARM_ALERT_BLUETOOTH_OFF)
-                    }
-                }
-
-                lastBtState = state
-                _btState.onNext(Optional.ofNullable(state))
-            }
+    /**
+     * The only btState source now: the plugin's Bluetooth broadcast receiver (adapter on/off) plus its
+     * startup seed. Raises the Bluetooth-off alarm on the ON→OFF edge, exactly like the legacy observer.
+     */
+    fun onBluetoothStateChanged(state: BleState) {
+        aapsLogger.debug(LTag.PUMPCOMM, "btState : $state")
+        if (state.isEnabled == DeviceModuleState.DEVICE_STATE_OFF &&
+            lastBtState != null && lastBtState?.isEnabled != DeviceModuleState.DEVICE_STATE_OFF
+        ) {
+            handleAlarm("alert", value = null, cause = AlarmCause.ALARM_ALERT_BLUETOOTH_OFF)
+        }
+        lastBtState = state
+        _btState.onNext(Optional.of(state))
     }
 
     fun releasePatch() {
@@ -321,27 +275,20 @@ class CarelevoPatch @Inject constructor(
     }
 
     fun flushPatchInformation() {
-        //unBondDevice()
-        // Clear cached patch/infusion info FIRST, before tearing down the link. This resets
-        // isCheckScreen (was keeping the wizard latched to SAFETY_CHECK after a mid-activation discard)
-        // and immediately drops patchState to NotConnectedNotBooting. Ordering matters: clearGatt() ->
-        // disableManager() blocks ~300ms (Thread.sleep) with the link already reported down, and if
-        // patchInfo were still present during that window the CommandQueue worker would see
-        // NotConnectedBooted and fire a reconnect at the patch we are discarding.
+        // Clear cached patch/infusion info. This resets isCheckScreen (was keeping the wizard latched
+        // to SAFETY_CHECK after a mid-activation discard) and immediately drops patchState to
+        // NotConnectedNotBooting. There is no resting GATT to tear down — sessions are per-op.
         _patchInfo.onNext(Optional.empty())
         _infusionInfo.onNext(Optional.empty())
-        bleController.clearGatt()
-        bleController.unRegisterPeripheralInfo()
     }
 
     private val discardInProgress = AtomicBoolean(false)
 
     /**
-     * Full BLE teardown for a discarded patch: remove the OS bond, then [releasePatch] (clear GATT +
-     * cached patch info). Single-flight — if a teardown is already running (e.g. a queued CmdDiscard
-     * racing the ViewModel force-discard fallback), the second caller is skipped so two threads never
-     * mutate the GATT handle at once. Self-contained: logs an unconfirmed unbond and swallows teardown
-     * errors, so callers report the already-decided discard result unaffected.
+     * Full BLE teardown for a discarded patch: remove the OS bond, then [releasePatch] (clear cached
+     * patch info). Single-flight — if a teardown is already running (e.g. a queued CmdDiscard racing
+     * the ViewModel force-discard fallback), the second caller is skipped. Self-contained: swallows
+     * teardown errors, so callers report the already-decided discard result unaffected.
      */
     fun discardTeardown() {
         if (!discardInProgress.compareAndSet(false, true)) {
@@ -349,10 +296,7 @@ class CarelevoPatch @Inject constructor(
             return
         }
         try {
-            val unbond = bleController.unBondDevice()
-            if (unbond !is CommandResult.Success) {
-                aapsLogger.warn(LTag.PUMPCOMM, "discardTeardown unbond not confirmed: $unbond")
-            }
+            getPatchInfoAddress()?.let { transport.adapter.removeBond(it.uppercase()) }
             releasePatch()
         } catch (e: Exception) {
             aapsLogger.error(LTag.PUMPCOMM, "discardTeardown error", e)
@@ -361,84 +305,11 @@ class CarelevoPatch @Inject constructor(
         }
     }
 
-    private fun observePatch() {
-        bleDisposable += patchObserver.patchResponseEvent
-            .observeOn(aapsSchedulers.io)
-            .subscribe {
-                proceedPatchEvent(it)
-            }
-    }
-
-    private fun proceedPatchEvent(model: PatchResultModel) {
-        when (model) {
-            is BasalInfusionResumeResultModel   -> {}
-
-            is FinishPulseReportResultModel     -> {}
-
-            is WarningReportResultModel         -> handleAlarm("warning", model.value, model.cause)
-            is AlertReportResultModel           -> handleAlarm("alert", model.value, model.cause)
-            is NoticeReportResultModel          -> handleAlarm("notice", model.value, model.cause)
-            is RetrieveOperationInfoResultModel -> updateRemainAndRefreshInfusion(model)
-            is InfusionInfoReportResultModel    -> updateInfusionInfo(model)
-        }
-    }
-
-    fun unBondDevice(): Single<Boolean> {
-        return Single
-            .fromCallable {
-                when (bleController.unBondDevice()) {
-                    is CommandResult.Success -> true
-                    else                     -> false
-                }
-            }
-            .subscribeOn(Schedulers.io())
-    }
-
-    private fun updateRemainAndRefreshInfusion(model: RetrieveOperationInfoResultModel) {
-        val requestModel = CarelevoPatchRptInfusionInfoDefaultRequestModel(remains = model.remains)
-
-        bleDisposable += patchRptInfusionInfoProcessUseCase.execute(requestModel)
-            .timeout(3000L, TimeUnit.MILLISECONDS)
-            .observeOn(aapsSchedulers.io)
-            .subscribeOn(aapsSchedulers.main)
-            .subscribe { response ->
-                when (response) {
-                    is ResponseResult.Success -> {
-                        aapsLogger.debug(LTag.PUMPCOMM, "response success")
-                        refreshPatchInfusionInfo()
-                    }
-
-                    is ResponseResult.Error   -> {
-                        aapsLogger.error(LTag.PUMPCOMM, "response error : ${response.e}")
-                    }
-
-                    else                      -> {
-                        aapsLogger.error(LTag.PUMPCOMM, "response failed")
-                    }
-                }
-            }
-    }
-
-    private fun updateInfusionInfo(model: InfusionInfoReportResultModel) {
-        dispatchInfusionInfo(
-            CarelevoPatchRptInfusionInfoRequestModel(
-                runningMinute = model.runningMinutes,
-                remains = model.remains,
-                infusedTotalBasalAmount = model.infusedTotalBasalAmount,
-                infusedTotalBolusAmount = model.infusedTotalBolusAmount,
-                pumpState = model.pumpState.commandToCode(),
-                mode = model.mode.commandToCode(),
-                currentInfusedProgramVolume = model.currentInfusedProgramVolume,
-                realInfusedTime = model.realInfusedTime
-            )
-        )
-    }
-
     /**
      * Persist an infusion-info report decoded by the new [app.aaps.pump.carelevo.ble.BleClient] stack
      * (Phase 2). [pumpStateRaw]/[modeRaw] are the raw 0x91 bytes; they are normalized through the same
-     * int→enum→int roundtrip the legacy `_patchEvent` path uses (`codeTo…().commandToCode()`) so the
-     * persisted values are byte-for-byte identical. Mirrors [updateInfusionInfo] but sourced from the
+     * int→enum→int round-trip the legacy `_patchEvent` path uses (`codeTo…().commandToCode()`) so the
+     * persisted values are byte-for-byte identical. Mirrors `updateInfusionInfo` but sourced from the
      * new command instead of the Rx `_patchEvent` subject.
      */
     fun applyInfusionInfoReport(
@@ -471,22 +342,12 @@ class CarelevoPatch @Inject constructor(
             .subscribe()
     }
 
-    private fun refreshPatchInfusionInfo() {
-        if (!isBluetoothEnabled()) {
-            return
-        }
-        if (!isCarelevoConnected()) {
-            return
-        }
-
-        infoDisposable += requestPatchInfusionInfoUseCase.execute()
-            .subscribeOn(aapsSchedulers.io)
-            .observeOn(aapsSchedulers.main)
-            .timeout(3, TimeUnit.SECONDS)
-            .subscribe()
-    }
-
-    private fun handleAlarm(modelType: String, value: Int?, cause: AlarmCause) {
+    /**
+     * Raise a patch alarm locally (alarm DB + notifier pipeline). Public seam: the future long-lived
+     * `unsolicitedEvents` bridge (queue-owned-link phase) feeds pump-pushed alert/warning/notice frames
+     * here; today it is used for the Bluetooth-off alert.
+     */
+    fun handleAlarm(modelType: String, value: Int?, cause: AlarmCause) {
         aapsLogger.debug(LTag.PUMPCOMM, "$modelType report : $value, $cause")
         val info = CarelevoAlarmInfo(
             alarmId = System.currentTimeMillis().toString(),

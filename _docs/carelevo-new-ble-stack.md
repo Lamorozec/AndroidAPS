@@ -271,15 +271,33 @@ whole driver):**
     (`scanAddress = null` → service-UUID filter); the wizard VM (flag-gated `startScanViaNewStack` /
     `startConnectViaNewStack`) collects the first `scannedDevices` hit (early-stop) and needs NO btState
     observer — the session owns its handshake. Legacy path untouched behind flag-off.
-  - **2.D-1 — the deletion (UNBLOCKED 2026-07-15 — 2.D-0b validated on a real patch change).** Delete the legacy core
-    (`CarelevoBleMangerImpl`/Controller/Source + `CarelevoPatchObserver` + 3 Bt remote datasources), all 23+
-    flag branches + the flag key, the 13 `awaitOnIo` sites, the 21 `blockingFirst` use-case bodies (persist
-    methods stay), rewrite ~22 legacy-mocking tests, re-enable the `@Disabled` retry test against the new
-    stack. **Connection model DECIDED: queue-owned new-stack link** (user choice over Omnipod-style
-    always-connected): port connect-before-execute to the new transport — the queue dials ONE long-lived
-    new-stack session, ops run over the open client, idle-disconnect keeps the 5 s keep-alive, and a
-    long-lived `unsolicitedEvents → CarelevoPatch` bridge rides the connection windows (this pulls D4's core
-    into 2.D-1; closes the alarms-during-session gap and keeps connection state visible in the UI).
+  - **2.D-1 — the deletion ✅ DONE (2026-07-15, −12,453/+776 lines across 160 files; module suite 294 green + full APK).**
+    Executed in four compiling stages:
+    - **1a — flag + branches:** `CARELEVO_USE_NEW_BLE_STACK` deleted; every `ViaNewStack` body became THE body
+      (executor 14 ops, both delivery coordinators, profile-update, plugin status read, pairing VM); the 13
+      `awaitOnIo` fallbacks + helper deleted; plugin tests moved onto session/persist stubs.
+    - **1b — connection border:** `CarelevoConnectionCoordinator` collapsed to the patch-pump model
+      (`isConnected()`=true, `connect`/`disconnect` no-ops, reconnection/refreshPumpStatus deleted);
+      `CarelevoNewStackGateway` deleted (coordinators call `CarelevoBleSession` directly); the
+      drop-legacy+1 s-settle dance removed everywhere, replaced by ONE inter-session settle guard inside
+      `withSession` (≥1 s between close and next connect); `isCarelevoConnected()` gates removed (a session
+      fails loudly if unreachable); plugin `txUuid` field gone.
+    - **1c — the legacy core:** deleted `ble/core/*`, `CarelevoBleSource`, `CarelevoPatchObserver`, 3 Bt remote
+      datasources, the whole `data/protocol/` tree (parsers/transformers/opcode enum) + parser DI, 3 BLE-only
+      repositories, 8 whole use cases; 16 use cases stripped to persist/build-only; `CarelevoPatch` lost
+      bleController/patchObserver (bond ops → `transport.adapter`, btState now fed ONLY by the plugin's
+      adapter-state receiver via `onBluetoothStateChanged`, `resolvePatchState` = patch-validity + BT-available,
+      `handleAlarm` made public as the future unsolicited-bridge seam); pairing-flow VM lost the legacy
+      cannula-ACK observer (the session needle check replaced it).
+    - **1d — tests:** 24 legacy test files deleted, base fixture cleaned; the `@Disabled` retry test retired
+      (scenario covered by `CarelevoBleSessionPairingTest`).
+    Follow-up noted: `AlarmClearRequestUseCase.commandAlarmType()` lost its (indirect) test coverage.
+    **Connection model end-state DECIDED: queue-owned new-stack link** (user choice over Omnipod-style
+    always-connected) — a follow-up phase ports connect-before-execute to the new transport: the queue dials ONE
+    long-lived session, ops run over the open client, idle-disconnect keeps the 5 s keep-alive, and a long-lived
+    `unsolicitedEvents → CarelevoPatch.handleAlarm` bridge rides the connection windows (pulls D4's core in;
+    closes the alarms-during-session gap and restores visible connection state). Until then the interim is the
+    device-proven per-op-session model.
   - **RxJava dep removal is NOT 2.D** — 92 files import `io.reactivex` (CarelevoPatch BehaviorSubjects, 6
     ViewModels, DB datasources). Deleting the legacy stack removes the dangerous Rx (lost-event correlation);
     the dependency itself goes with roadmap steps 5/7 (BehaviorSubject→StateFlow + VM conversions) as a

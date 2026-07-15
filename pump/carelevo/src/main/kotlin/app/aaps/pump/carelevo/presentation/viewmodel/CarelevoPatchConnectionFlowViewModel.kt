@@ -30,11 +30,7 @@ import app.aaps.pump.carelevo.common.model.Event
 import app.aaps.pump.carelevo.common.model.PatchState
 import app.aaps.pump.carelevo.common.model.State
 import app.aaps.pump.carelevo.common.model.UiState
-import app.aaps.pump.carelevo.domain.CarelevoPatchObserver
 import app.aaps.pump.carelevo.domain.model.ResponseResult
-import app.aaps.pump.carelevo.domain.model.bt.CannulaInsertionResultModel
-import app.aaps.pump.carelevo.domain.model.bt.Result
-import app.aaps.pump.carelevo.domain.usecase.patch.CarelevoPatchCannulaInsertionConfirmUseCase
 import app.aaps.pump.carelevo.domain.usecase.patch.CarelevoPatchForceDiscardUseCase
 import app.aaps.pump.carelevo.presentation.model.CarelevoConnectEvent
 import app.aaps.pump.carelevo.presentation.type.CarelevoPatchStep
@@ -55,9 +51,7 @@ class CarelevoPatchConnectionFlowViewModel @Inject constructor(
     private val aapsSchedulers: AapsSchedulers,
     private val carelevoPatch: CarelevoPatch,
     private val commandQueue: CommandQueue,
-    private val patchObserver: CarelevoPatchObserver,
     private val patchForceDiscardUseCase: CarelevoPatchForceDiscardUseCase,
-    private val patchCannulaInsertionConfirmUseCase: CarelevoPatchCannulaInsertionConfirmUseCase,
     private val preferences: Preferences,
     private val profileFunction: ProfileFunction,
     private val profileRepository: ProfileRepository,
@@ -187,48 +181,6 @@ class CarelevoPatchConnectionFlowViewModel @Inject constructor(
     fun confirmAmount(amount: Int) {
         setInputInsulin(amount)
         goToNextStep(CarelevoPatchStep.SET_AMOUNT)
-    }
-
-    fun observePatchEvent() {
-        compositeDisposable += patchObserver.patchEvent
-            .observeOn(aapsSchedulers.io)
-            .subscribeOn(aapsSchedulers.io)
-            .subscribe { model ->
-                when (model) {
-                    is CannulaInsertionResultModel -> {
-                        if (model.result != Result.FAILED) {
-                            confirmCannulaInsertionResult()
-                        }
-                    }
-                }
-            }
-    }
-
-    private fun confirmCannulaInsertionResult() {
-        compositeDisposable += patchCannulaInsertionConfirmUseCase.execute()
-            .observeOn(aapsSchedulers.io)
-            .subscribeOn(aapsSchedulers.io)
-            .subscribe { response ->
-                when (response) {
-                    is ResponseResult.Success -> {
-                        aapsLogger.debug(LTag.PUMPCOMM, "response success")
-                        /*pumpSync.insertTherapyEventIfNewWithTimestamp(
-                            timestamp = System.currentTimeMillis(),
-                            type = TE.Type.CANNULA_CHANGE,
-                            pumpType = PumpType.CAREMEDI_CARELEVO,
-                            pumpSerial = carelevoPatch.patchInfo.value?.getOrNull()?.manufactureNumber ?: ""
-                        )*/
-                    }
-
-                    is ResponseResult.Error   -> {
-                        aapsLogger.debug(LTag.PUMPCOMM, "response error : ${response.e}")
-                    }
-
-                    else                      -> {
-                        aapsLogger.debug(LTag.PUMPCOMM, "response failed")
-                    }
-                }
-            }
     }
 
     fun triggerEvent(event: Event) {
@@ -436,6 +388,5 @@ class CarelevoPatchConnectionFlowViewModel @Inject constructor(
 
     override fun onCleared() {
         compositeDisposable.clear()
-        super.onCleared()
     }
 }
