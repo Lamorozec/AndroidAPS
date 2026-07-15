@@ -129,11 +129,12 @@ class CommandQueueImplementation @Inject constructor(
     // (and the awaited deferred) on its own; this only guards the pathological lost-callback case so a
     // hung set can't block the sequential profile-change collector forever. Tune if pumps legitimately
     // need longer.
+    @Suppress("PrivatePropertyName")
     private val PROFILE_SET_TIMEOUT_MS = 10 * 60 * 1000
 
     init {
         // collectResilient guarantees a single failed onProfileChanged() can never permanently wedge
-        // profile switching (an unguarded collector would be cancelled for the whole process lifetime,
+        // profile switching (an unguarded collector would be canceled for the whole process lifetime,
         // after which every later ProfileSwitch is silently dropped: no pump push, no
         // EffectiveProfileSwitch, isProfileChangePending() stuck true). The hang vector is handled
         // separately by the withTimeoutOrNull() inside onProfileChanged().
@@ -165,7 +166,7 @@ class CommandQueueImplementation @Inject constructor(
             // Bound the pump round-trip. setProfile() awaits a CommandSetProfile callback; if that
             // callback is ever lost the deferred never completes, and because the collector processes
             // emissions sequentially that single hang would block every future ProfileSwitch. On
-            // timeout we treat it as a failed update so the collector stays alive.
+            // timeout, we treat it as a failed update so the collector stays alive.
             val result = withTimeoutOrNull(PROFILE_SET_TIMEOUT_MS.milliseconds) {
                 setProfile(ProfileSealed.PS(it, activePlugin), it.ids.nightscoutId != null)
             }
@@ -214,7 +215,7 @@ class CommandQueueImplementation @Inject constructor(
      * Dismissing FAILED_UPDATE_PROFILE centrally is safe only because Equil's alarms were migrated off that id to
      * EQUIL_LOW_BATTERY / PUMP_ERROR.
      *
-     * @return true when the write succeeded (the caller then persists the EffectiveProfileSwitch).
+     * @return true when write succeeded (the caller then persists the EffectiveProfileSwitch).
      */
     internal fun postProfileWriteResult(result: PumpEnactResult?, silent: Boolean): Boolean {
         if (result == null || !result.success) {
@@ -236,11 +237,10 @@ class CommandQueueImplementation @Inject constructor(
 
     /**
      * Running-mode gate: reject commands that contradict the currently active running mode.
-     * Returns true if the command was rejected (caller should return false); false if allowed.
+     * Returns the rejection result if the gate rejects, or null if the command is allowed.
      * Fails open on read errors — the gate is a belt, not the only line; upstream checks already
-     * handle most suspended-mode paths in [LoopPlugin.invoke] and [applySMBRequest].
+     * handle most suspended-mode paths in [app.aaps.core.interfaces.aps.Loop.invoke] and `LoopPlugin.applySMBRequest`.
      */
-    /** Returns the rejection result if the gate rejects, or null if the command is allowed. */
     private suspend fun rejectedByRunningModeGate(kind: PumpCommandGate.CommandKind): PumpEnactResult? {
         val mode = try {
             persistenceLayer.getRunningModeActiveAt(dateUtil.now()).mode
