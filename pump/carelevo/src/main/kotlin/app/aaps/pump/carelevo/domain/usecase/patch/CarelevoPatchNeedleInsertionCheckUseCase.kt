@@ -147,4 +147,19 @@ class CarelevoPatchNeedleInsertionCheckUseCase @Inject constructor(
             )
         }.observeOn(Schedulers.io())
     }
+
+    /**
+     * Persist the cannula-insertion outcome (Phase-2 new-BLE-stack path reuse): `checkNeedle=true` on
+     * [success], else `checkNeedle=false` + `needleFailedCount++` — identical to [execute]. Returns false
+     * with no patch record or on a failed write.
+     */
+    fun persistNeedleResult(success: Boolean): Boolean {
+        val patchInfo = patchInfoRepository.getPatchInfoBySync() ?: return false
+        return if (success) {
+            patchInfoRepository.updatePatchInfo(patchInfo.copy(updatedAt = DateTime.now(), checkNeedle = true))
+        } else {
+            val nextFailedCount = (patchInfo.needleFailedCount ?: 0) + 1
+            patchInfoRepository.updatePatchInfo(patchInfo.copy(updatedAt = DateTime.now(), checkNeedle = false, needleFailedCount = nextFailedCount))
+        }
+    }
 }

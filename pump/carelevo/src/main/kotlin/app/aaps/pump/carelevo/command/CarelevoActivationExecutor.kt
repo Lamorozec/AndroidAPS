@@ -8,12 +8,24 @@ import app.aaps.core.interfaces.rx.AapsSchedulers
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.pump.carelevo.ble.CarelevoBleSession
 import app.aaps.pump.carelevo.ble.commands.BuzzModeCommand
+import app.aaps.pump.carelevo.ble.commands.InfusionThresholdCommand
+import app.aaps.pump.carelevo.ble.commands.NoticeThresholdCommand
+import app.aaps.pump.carelevo.ble.BleCommand
+import app.aaps.pump.carelevo.ble.commands.AdditionalPrimingCommand
+import app.aaps.pump.carelevo.ble.commands.AlarmClearCommand
+import app.aaps.pump.carelevo.ble.commands.PatchDiscardCommand
 import app.aaps.pump.carelevo.ble.commands.PumpResumeCommand
 import app.aaps.pump.carelevo.ble.commands.PumpStopCommand
+import app.aaps.pump.carelevo.ble.commands.NeedleStatusCommand
+import app.aaps.pump.carelevo.ble.commands.SafetyCheckCommand
+import app.aaps.pump.carelevo.ble.commands.SetTimeCommand
+import app.aaps.pump.carelevo.ble.commands.SimpleResultResponse
 import app.aaps.pump.carelevo.common.CarelevoPatch
 import app.aaps.pump.carelevo.common.keys.CarelevoBooleanPreferenceKey
 import app.aaps.pump.carelevo.coordinator.CarelevoConnectionCoordinator
 import app.aaps.pump.carelevo.domain.model.ResponseResult
+import app.aaps.pump.carelevo.domain.model.bt.SafetyCheckResult
+import app.aaps.pump.carelevo.domain.model.bt.SafetyCheckResultModel
 import app.aaps.pump.carelevo.domain.model.patch.NeedleCheckSuccess
 import app.aaps.pump.carelevo.domain.type.SafetyProgress
 import app.aaps.pump.carelevo.domain.usecase.alarm.AlarmClearPatchDiscardUseCase
@@ -43,6 +55,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.runBlocking
+import org.joda.time.DateTime
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Provider
@@ -106,6 +119,10 @@ class CarelevoActivationExecutor @Inject constructor(
         private const val RESULT_SUCCESS = 0 // pump result byte 0 = SUCCESS / BY_REQ (legacy Result/StopPumpResult taxonomy)
         private const val STOP_RESUME_SUB_ID = 0 // legacy StopPumpRequest/ResumePumpRequest use subId/causeId = 0
         private const val RESUME_MODE = 1 // legacy ResumePumpRequest(mode = 1)
+        private const val TIMEZONE_SUB_ID = 1 // legacy SetTimeRequest(subId = 1) for the timezone/DST update path
+        private const val TIMEZONE_AID_MODE = 0 // legacy SetTimeRequest(aidMode = 0)
+        private const val NEEDLE_CHECK_NEW_STACK_TIMEOUT_MS = 90_000L // physical cannula insertion may take a while
+        private const val SAFETY_PROGRESS_HEADROOM_SEC = 30 // legacy: Progress timeout = firstFrame.durationSeconds + 30
     }
 
     private val _safetyProgress = MutableSharedFlow<SafetyProgress>(extraBufferCapacity = 16)
@@ -137,6 +154,9 @@ class CarelevoActivationExecutor @Inject constructor(
     }
 
     private fun runSafetyCheck(): PumpEnactResult {
+        if (preferences.get(CarelevoBooleanPreferenceKey.CARELEVO_USE_NEW_BLE_STACK)) {
+            return runSafetyCheckViaNewStack()
+        }
         val result = pumpEnactResultProvider.get()
         var success = false
         try {
@@ -162,6 +182,9 @@ class CarelevoActivationExecutor @Inject constructor(
     }
 
     private fun runNeedleCheck(): PumpEnactResult {
+        if (preferences.get(CarelevoBooleanPreferenceKey.CARELEVO_USE_NEW_BLE_STACK)) {
+            return runNeedleCheckViaNewStack()
+        }
         val result = pumpEnactResultProvider.get()
         return try {
             val response = awaitOnIo(needleCheckUseCase.execute(), NEEDLE_CHECK_TIMEOUT_SEC)
@@ -174,6 +197,9 @@ class CarelevoActivationExecutor @Inject constructor(
     }
 
     private fun runSetBasal(): PumpEnactResult {
+        if (preferences.get(CarelevoBooleanPreferenceKey.CARELEVO_USE_NEW_BLE_STACK)) {
+            return runSetBasalViaNewStack()
+        }
         val result = pumpEnactResultProvider.get()
         val profile = carelevoPatch.profile.value?.getOrNull()
             ?: return result.success(false).enacted(false).comment("profile not set")
@@ -187,7 +213,40 @@ class CarelevoActivationExecutor @Inject constructor(
         }
     }
 
+    /**
+     * Phase-2 initial basal program over the new stack (flag-gated, **delivery-critical**). Mirrors
+     * [runSetBasal]: build the 3-program plan with the use case's exact mapping, send all three
+     * [app.aaps.pump.carelevo.ble.commands.BasalProgramCommand]s over ONE session (via
+     * [CarelevoBleSession.runBasalProgram]), and only on all-success reuse the use case's `mode=1` +
+     * infusion-info persist. Activation-only op (validated on a physical patch change).
+     */
+    private fun runSetBasalViaNewStack(): PumpEnactResult {
+        val result = pumpEnactResultProvider.get()
+        val profile = carelevoPatch.profile.value?.getOrNull()
+            ?: return result.success(false).enacted(false).comment("profile not set")
+        val address = carelevoPatch.getPatchInfoAddress()
+            ?: return result.success(false).enacted(false).comment("no patch address")
+        return try {
+            connectionCoordinator.disconnect("new-ble-session")
+            val plan = setBasalUseCase.buildBasalProgramPlan(profile)
+            val programmed = runBlocking {
+                delay(NEW_BLE_SETTLE_MS)
+                bleSession.runBasalProgram(address, plan.programs)
+            }
+            val persisted = if (programmed) setBasalUseCase.persistBasalProgram(plan.segments) else false
+            aapsLogger.info(LTag.PUMPCOMM, "newBle.setBasal programmed=$programmed persisted=$persisted")
+            val ok = programmed && persisted
+            result.success(ok).enacted(ok)
+        } catch (e: Exception) {
+            aapsLogger.error(LTag.PUMPCOMM, "newBle.setBasal FAILED", e)
+            result.success(false).enacted(false).comment(e.message ?: "error")
+        }
+    }
+
     private fun runAdditionalPriming(): PumpEnactResult {
+        if (preferences.get(CarelevoBooleanPreferenceKey.CARELEVO_USE_NEW_BLE_STACK)) {
+            return runSingleWriteViaNewStack("additionalPriming") { AdditionalPrimingCommand() }
+        }
         val result = pumpEnactResultProvider.get()
         return try {
             val response = awaitOnIo(additionalPrimingUseCase.execute(), ADDITIONAL_PRIMING_TIMEOUT_SEC)
@@ -208,6 +267,9 @@ class CarelevoActivationExecutor @Inject constructor(
      * for when the queue cannot reach the patch at all.
      */
     private fun runDiscard(): PumpEnactResult {
+        if (preferences.get(CarelevoBooleanPreferenceKey.CARELEVO_USE_NEW_BLE_STACK)) {
+            return runDiscardViaNewStack()
+        }
         val result = pumpEnactResultProvider.get()
         // The STOP alone decides success: a teardown failure only leaves a stale bond and must NOT
         // flip an already-successful stop to failure. Teardown runs on this (queue worker) thread so
@@ -309,6 +371,11 @@ class CarelevoActivationExecutor @Inject constructor(
     }
 
     private fun runTimeZoneUpdate(command: CmdTimeZoneUpdate): PumpEnactResult {
+        if (preferences.get(CarelevoBooleanPreferenceKey.CARELEVO_USE_NEW_BLE_STACK)) {
+            return runSingleWriteViaNewStack("timeZoneUpdate") {
+                SetTimeCommand(subId = TIMEZONE_SUB_ID, volume = command.insulinAmount, aidMode = TIMEZONE_AID_MODE, dateTime = DateTime.now())
+            }
+        }
         val result = pumpEnactResultProvider.get()
         return try {
             val response = awaitOnIo(timeZoneUpdateUseCase.execute(CarelevoPatchTimeZoneRequestModel(insulinAmount = command.insulinAmount)), TIMEZONE_UPDATE_TIMEOUT_SEC)
@@ -323,6 +390,9 @@ class CarelevoActivationExecutor @Inject constructor(
     // patchState is read HERE (queue worker thread, after the reconnect) so the setting is pushed with the
     // patch's current state, not whatever it was when the preference-change enqueued the command.
     private fun runUpdateMaxBolus(command: CmdUpdateMaxBolus): PumpEnactResult {
+        if (preferences.get(CarelevoBooleanPreferenceKey.CARELEVO_USE_NEW_BLE_STACK)) {
+            return runUpdateMaxBolusViaNewStack(command.maxBolusDose)
+        }
         val result = pumpEnactResultProvider.get()
         val patchState = carelevoPatch.patchState.value?.getOrNull()
         return try {
@@ -341,6 +411,9 @@ class CarelevoActivationExecutor @Inject constructor(
     }
 
     private fun runUpdateLowInsulinNotice(command: CmdUpdateLowInsulinNotice): PumpEnactResult {
+        if (preferences.get(CarelevoBooleanPreferenceKey.CARELEVO_USE_NEW_BLE_STACK)) {
+            return runUpdateLowInsulinNoticeViaNewStack(command.hours)
+        }
         val result = pumpEnactResultProvider.get()
         val patchState = carelevoPatch.patchState.value?.getOrNull()
         return try {
@@ -359,6 +432,9 @@ class CarelevoActivationExecutor @Inject constructor(
     }
 
     private fun runUpdateExpiredThreshold(command: CmdUpdateExpiredThreshold): PumpEnactResult {
+        if (preferences.get(CarelevoBooleanPreferenceKey.CARELEVO_USE_NEW_BLE_STACK)) {
+            return runUpdateExpiredThresholdViaNewStack(command.hours)
+        }
         val result = pumpEnactResultProvider.get()
         val patchState = carelevoPatch.patchState.value?.getOrNull()
         return try {
@@ -424,7 +500,273 @@ class CarelevoActivationExecutor @Inject constructor(
         }
     }
 
+    /**
+     * Phase-2 max-bolus setting over the new [app.aaps.pump.carelevo.ble.BleClient] stack (flag-gated).
+     * Preserves the legacy semantics: never push a threshold mid-bolus (persist locally + defer via
+     * `needMaxBolusDoseSyncPatch`); otherwise drop the legacy link, write [InfusionThresholdCommand]
+     * (max-volume) on the new transport, then persist with `synced` = the patch confirmed. On any failure
+     * the value is still persisted with the sync flag set so the deferred-sync re-pushes on reconnect.
+     */
+    private fun runUpdateMaxBolusViaNewStack(value: Double): PumpEnactResult {
+        val result = pumpEnactResultProvider.get()
+        if (updateMaxBolusDoseUseCase.isBolusRunning()) {
+            val persisted = updateMaxBolusDoseUseCase.persistMaxBolusDose(value, synced = false)
+            aapsLogger.info(LTag.PUMPCOMM, "newBle.maxBolus bolus-running → deferred persisted=$persisted")
+            return result.success(persisted).enacted(persisted)
+        }
+        val address = carelevoPatch.getPatchInfoAddress()
+            ?: return result.success(false).enacted(false).comment("no patch address")
+        return try {
+            connectionCoordinator.disconnect("new-ble-session")
+            val response = runBlocking {
+                delay(NEW_BLE_SETTLE_MS)
+                bleSession.runSingle(address, InfusionThresholdCommand(isMaxVolume = true, value = value))
+            }
+            val pushed = response.resultCode == RESULT_SUCCESS
+            val persisted = updateMaxBolusDoseUseCase.persistMaxBolusDose(value, synced = pushed)
+            aapsLogger.info(LTag.PUMPCOMM, "newBle.maxBolus OK value=$value result=${response.resultCode} persisted=$persisted")
+            val success = pushed && persisted
+            result.success(success).enacted(success)
+        } catch (e: Exception) {
+            aapsLogger.error(LTag.PUMPCOMM, "newBle.maxBolus FAILED", e)
+            updateMaxBolusDoseUseCase.persistMaxBolusDose(value, synced = false) // keep desired value + defer re-sync
+            result.success(false).enacted(false).comment(e.message ?: "error")
+        }
+    }
+
+    /**
+     * Phase-2 low-insulin-notice setting over the new stack (flag-gated). The 0x75 response fabricates a
+     * result of 0, so arrival = success (mirrors legacy). Persists via the extracted use-case method with
+     * `synced` = arrived; on failure the value is persisted deferred for the next reconnect.
+     */
+    private fun runUpdateLowInsulinNoticeViaNewStack(hours: Int): PumpEnactResult {
+        val result = pumpEnactResultProvider.get()
+        val address = carelevoPatch.getPatchInfoAddress()
+            ?: return result.success(false).enacted(false).comment("no patch address")
+        return try {
+            connectionCoordinator.disconnect("new-ble-session")
+            val response = runBlocking {
+                delay(NEW_BLE_SETTLE_MS)
+                bleSession.runSingle(address, NoticeThresholdCommand(thresholdType = NoticeThresholdCommand.TYPE_LOW_INSULIN, value = hours))
+            }
+            val pushed = response.resultCode == RESULT_SUCCESS
+            val persisted = updateLowInsulinNoticeAmountUseCase.persistLowInsulinNoticeAmount(hours, synced = pushed)
+            aapsLogger.info(LTag.PUMPCOMM, "newBle.lowInsulinNotice OK hours=$hours result=${response.resultCode} persisted=$persisted")
+            val success = pushed && persisted
+            result.success(success).enacted(success)
+        } catch (e: Exception) {
+            aapsLogger.error(LTag.PUMPCOMM, "newBle.lowInsulinNotice FAILED", e)
+            updateLowInsulinNoticeAmountUseCase.persistLowInsulinNoticeAmount(hours, synced = false)
+            result.success(false).enacted(false).comment(e.message ?: "error")
+        }
+    }
+
+    /**
+     * Phase-2 patch-expiry-reminder setting over the new stack (flag-gated). The legacy use case has NO
+     * userSettingInfo persist for this op (the preference is the source of truth), so this is a pure BLE
+     * write like the buzzer; arrival of the 0x75 frame (fabricated result 0) = success.
+     */
+    private fun runUpdateExpiredThresholdViaNewStack(hours: Int): PumpEnactResult {
+        val result = pumpEnactResultProvider.get()
+        val address = carelevoPatch.getPatchInfoAddress()
+            ?: return result.success(false).enacted(false).comment("no patch address")
+        return try {
+            connectionCoordinator.disconnect("new-ble-session")
+            val response = runBlocking {
+                delay(NEW_BLE_SETTLE_MS)
+                bleSession.runSingle(address, NoticeThresholdCommand(thresholdType = NoticeThresholdCommand.TYPE_EXPIRY, value = hours))
+            }
+            val success = response.resultCode == RESULT_SUCCESS
+            aapsLogger.info(LTag.PUMPCOMM, "newBle.expiryThreshold OK hours=$hours result=${response.resultCode}")
+            result.success(success).enacted(success)
+        } catch (e: Exception) {
+            aapsLogger.error(LTag.PUMPCOMM, "newBle.expiryThreshold FAILED", e)
+            result.success(false).enacted(false).comment(e.message ?: "error")
+        }
+    }
+
+    /**
+     * Shared Phase-2 path for a pure single-response WRITE with no persistence (buzzer-style ops:
+     * additional-priming, timezone, …): drop the legacy link + settle, run [command] on the new
+     * transport's own session, success = `resultCode == 0`. Runs on the queue worker (blocked inside
+     * the command) so the worker cannot re-dial legacy concurrently.
+     */
+    private fun runSingleWriteViaNewStack(label: String, command: () -> BleCommand<SimpleResultResponse>): PumpEnactResult {
+        val result = pumpEnactResultProvider.get()
+        val address = carelevoPatch.getPatchInfoAddress()
+            ?: return result.success(false).enacted(false).comment("no patch address")
+        return try {
+            connectionCoordinator.disconnect("new-ble-session")
+            val response = runBlocking {
+                delay(NEW_BLE_SETTLE_MS)
+                bleSession.runSingle(address, command())
+            }
+            val success = response.resultCode == RESULT_SUCCESS
+            aapsLogger.info(LTag.PUMPCOMM, "newBle.$label OK result=${response.resultCode}")
+            result.success(success).enacted(success)
+        } catch (e: Exception) {
+            aapsLogger.error(LTag.PUMPCOMM, "newBle.$label FAILED", e)
+            result.success(false).enacted(false).comment(e.message ?: "error")
+        }
+    }
+
+    /**
+     * Phase-2 discard over the new stack (flag-gated). Mirrors [runDiscard]: the STOP write alone
+     * ([PatchDiscardCommand] 0x36) decides success; a teardown failure must not flip an already-stopped
+     * patch to failure. Teardown runs here on the queue worker thread (no reconnect race).
+     */
+    private fun runDiscardViaNewStack(): PumpEnactResult {
+        val result = pumpEnactResultProvider.get()
+        val address = carelevoPatch.getPatchInfoAddress()
+            ?: return result.success(false).enacted(false).comment("no patch address")
+        val stopped = try {
+            connectionCoordinator.disconnect("new-ble-session")
+            val response = runBlocking {
+                delay(NEW_BLE_SETTLE_MS)
+                bleSession.runSingle(address, PatchDiscardCommand())
+            }
+            response.resultCode == RESULT_SUCCESS
+        } catch (e: Exception) {
+            aapsLogger.error(LTag.PUMPCOMM, "newBle.discard stop exception", e)
+            false
+        }
+        if (stopped) carelevoPatch.discardTeardown()
+        aapsLogger.info(LTag.PUMPCOMM, "newBle.discard stopped=$stopped")
+        return result.success(stopped).enacted(stopped)
+    }
+
+    /**
+     * Phase-2 cannula-insertion (needle) check over the new stack (flag-gated). Long timeout — the pump
+     * reports 0x79 only after the physical insertion. `resultCode == 0` = SUCCESS; the [checkNeedle] /
+     * failure-count persist is reused from the use case. Activation-only op (validated on a patch change).
+     */
+    private fun runNeedleCheckViaNewStack(): PumpEnactResult {
+        val result = pumpEnactResultProvider.get()
+        val address = carelevoPatch.getPatchInfoAddress()
+            ?: return result.success(false).enacted(false).comment("no patch address")
+        return try {
+            connectionCoordinator.disconnect("new-ble-session")
+            val response = runBlocking {
+                delay(NEW_BLE_SETTLE_MS)
+                bleSession.runSingle(address, NeedleStatusCommand(), timeoutMs = NEEDLE_CHECK_NEW_STACK_TIMEOUT_MS)
+            }
+            val inserted = response.resultCode == RESULT_SUCCESS
+            val persisted = needleCheckUseCase.persistNeedleResult(inserted)
+            aapsLogger.info(LTag.PUMPCOMM, "newBle.needleCheck inserted=$inserted result=${response.resultCode} persisted=$persisted")
+            val ok = inserted && persisted
+            result.success(ok).enacted(ok)
+        } catch (e: Exception) {
+            aapsLogger.error(LTag.PUMPCOMM, "newBle.needleCheck FAILED", e)
+            result.success(false).enacted(false).comment(e.message ?: "error")
+        }
+    }
+
+    /**
+     * Phase-2 Safety Check over the new stack (flag-gated) — the first hardware use of `requestStream`.
+     * Streams each 0x72 frame; progress frames (REP_REQUEST/REP_REQUEST1) drive the wizard countdown via
+     * [_safetyProgress] (one Progress emit, matching legacy), the terminal SUCCESS frame persists
+     * `checkSafety` + emits Success, any other terminal is an Error. Activation-only (validated on a patch change).
+     */
+    private fun runSafetyCheckViaNewStack(): PumpEnactResult {
+        val result = pumpEnactResultProvider.get()
+        val address = carelevoPatch.getPatchInfoAddress()
+            ?: return result.success(false).enacted(false).comment("no patch address")
+        var success = false
+        var progressEmitted = false
+        return try {
+            connectionCoordinator.disconnect("new-ble-session")
+            runBlocking {
+                delay(NEW_BLE_SETTLE_MS)
+                bleSession.runSafetyCheck(address) { frame ->
+                    when (frame.resultCode) {
+                        SafetyCheckCommand.REP_REQUEST, SafetyCheckCommand.REP_REQUEST1 -> {
+                            if (!progressEmitted) {
+                                progressEmitted = true
+                                _safetyProgress.tryEmit(SafetyProgress.Progress((frame.durationSeconds + SAFETY_PROGRESS_HEADROOM_SEC).toLong()))
+                            }
+                        }
+
+                        SafetyCheckCommand.RESULT_SUCCESS                              -> {
+                            if (safetyCheckUseCase.persistSafetyChecked()) {
+                                success = true
+                                _safetyProgress.tryEmit(SafetyProgress.Success(SafetyCheckResultModel(SafetyCheckResult.SUCCESS, frame.insulinVolume, frame.durationSeconds)))
+                            } else {
+                                _safetyProgress.tryEmit(SafetyProgress.Error(IllegalStateException("update patch info is failed")))
+                            }
+                        }
+
+                        else                                                          ->
+                            _safetyProgress.tryEmit(SafetyProgress.Error(IllegalStateException("safety check failed: result ${frame.resultCode}")))
+                    }
+                }
+            }
+            result.success(success).enacted(success)
+        } catch (e: Exception) {
+            aapsLogger.error(LTag.PUMPCOMM, "newBle.safetyCheck FAILED", e)
+            _safetyProgress.tryEmit(SafetyProgress.Error(e))
+            result.success(false).enacted(false).comment(e.message ?: "error")
+        }
+    }
+
+    /**
+     * Phase-2 alarm clear over the new stack (flag-gated): map the cause to the wire alarm-type byte, send
+     * [AlarmClearCommand] (0x47 → 0xA7), and on `resultCode == 0` reuse the use case's `markAcknowledged`
+     * persist. Mirrors [runAlarmClear].
+     */
+    private fun runAlarmClearViaNewStack(command: CmdAlarmClear): PumpEnactResult {
+        val result = pumpEnactResultProvider.get()
+        val address = carelevoPatch.getPatchInfoAddress()
+            ?: return result.success(false).enacted(false).comment("no patch address")
+        return try {
+            connectionCoordinator.disconnect("new-ble-session")
+            val alarmTypeByte = alarmClearRequestUseCase.commandAlarmType(command.alarmCause)
+            val cause = command.alarmCause.code ?: 0
+            val response = runBlocking {
+                delay(NEW_BLE_SETTLE_MS)
+                bleSession.runSingle(address, AlarmClearCommand(alarmTypeByte, cause))
+            }
+            val cleared = response.resultCode == RESULT_SUCCESS
+            val persisted = if (cleared) alarmClearRequestUseCase.persistAlarmCleared(command.alarmId) else false
+            aapsLogger.info(LTag.PUMPCOMM, "newBle.alarmClear cleared=$cleared result=${response.resultCode} persisted=$persisted")
+            val ok = cleared && persisted
+            result.success(ok).enacted(ok)
+        } catch (e: Exception) {
+            aapsLogger.error(LTag.PUMPCOMM, "newBle.alarmClear FAILED", e)
+            result.success(false).enacted(false).comment(e.message ?: "error")
+        }
+    }
+
+    /**
+     * Phase-2 alarm-triggered patch discard over the new stack (flag-gated): send [PatchDiscardCommand]
+     * (0x36) then reuse the use case's DB cleanup (ack + reset sync flags + delete infusion/patch). Mirrors
+     * [runAlarmClearPatchDiscard], which — unlike the plain [runDiscard] — does NOT unbond (no
+     * `discardTeardown`); kept faithful to the legacy path.
+     */
+    private fun runAlarmClearPatchDiscardViaNewStack(command: CmdAlarmClearPatchDiscard): PumpEnactResult {
+        val result = pumpEnactResultProvider.get()
+        val address = carelevoPatch.getPatchInfoAddress()
+            ?: return result.success(false).enacted(false).comment("no patch address")
+        return try {
+            connectionCoordinator.disconnect("new-ble-session")
+            val response = runBlocking {
+                delay(NEW_BLE_SETTLE_MS)
+                bleSession.runSingle(address, PatchDiscardCommand())
+            }
+            val discarded = response.resultCode == RESULT_SUCCESS
+            val persisted = if (discarded) alarmClearPatchDiscardUseCase.persistAlarmDiscarded(command.alarmId) else false
+            aapsLogger.info(LTag.PUMPCOMM, "newBle.alarmClearPatchDiscard discarded=$discarded result=${response.resultCode} persisted=$persisted")
+            val ok = discarded && persisted
+            result.success(ok).enacted(ok)
+        } catch (e: Exception) {
+            aapsLogger.error(LTag.PUMPCOMM, "newBle.alarmClearPatchDiscard FAILED", e)
+            result.success(false).enacted(false).comment(e.message ?: "error")
+        }
+    }
+
     private fun runAlarmClear(command: CmdAlarmClear): PumpEnactResult {
+        if (preferences.get(CarelevoBooleanPreferenceKey.CARELEVO_USE_NEW_BLE_STACK)) {
+            return runAlarmClearViaNewStack(command)
+        }
         val result = pumpEnactResultProvider.get()
         return try {
             val response = awaitOnIo(
@@ -442,6 +784,9 @@ class CarelevoActivationExecutor @Inject constructor(
     }
 
     private fun runAlarmClearPatchDiscard(command: CmdAlarmClearPatchDiscard): PumpEnactResult {
+        if (preferences.get(CarelevoBooleanPreferenceKey.CARELEVO_USE_NEW_BLE_STACK)) {
+            return runAlarmClearPatchDiscardViaNewStack(command)
+        }
         val result = pumpEnactResultProvider.get()
         return try {
             val response = awaitOnIo(

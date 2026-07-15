@@ -10,6 +10,7 @@ import app.aaps.pump.carelevo.domain.model.result.ResultFailed
 import app.aaps.pump.carelevo.domain.model.result.ResultSuccess
 import app.aaps.pump.carelevo.domain.repository.CarelevoAlarmInfoRepository
 import app.aaps.pump.carelevo.domain.repository.CarelevoPatchRepository
+import app.aaps.pump.carelevo.domain.type.AlarmCause
 import app.aaps.pump.carelevo.domain.type.AlarmType
 import app.aaps.pump.carelevo.domain.usecase.CarelevoUseCaseRequest
 import app.aaps.pump.carelevo.domain.usecase.CarelevoUseCaseResponse
@@ -77,5 +78,29 @@ class AlarmClearRequestUseCase(
                 }
             )
         }.observeOn(Schedulers.io())
+    }
+
+    /**
+     * Map an [AlarmCause]'s [AlarmType] to the wire alarm-type byte (ALERT=162, NOTICE=163) — the exact
+     * mapping [execute] uses, extracted so the Phase-2 new-BLE-stack path can build the `AlarmClearCommand`.
+     */
+    fun commandAlarmType(alarmCause: AlarmCause): Int = when (alarmCause.alarmType) {
+        AlarmType.ALERT  -> ALARM_TYPE_ALERT
+        AlarmType.NOTICE -> ALARM_TYPE_NOTICE
+        else             -> throw IllegalArgumentException("alarmType is not supported")
+    }
+
+    /**
+     * Persist the alarm acknowledgement (`markAcknowledged`) — extracted from [execute]'s SUCCESS branch so
+     * the Phase-2 new-BLE-stack path reuses the exact same write. Returns false if the write throws.
+     */
+    fun persistAlarmCleared(alarmId: String): Boolean = runCatching {
+        alarmRepository.markAcknowledged(alarmId = alarmId, acknowledged = true, updatedAt = LocalDateTime.now().toString()).blockingAwait()
+    }.isSuccess
+
+    companion object {
+
+        private const val ALARM_TYPE_ALERT = 162
+        private const val ALARM_TYPE_NOTICE = 163
     }
 }

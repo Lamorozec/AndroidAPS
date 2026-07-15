@@ -67,4 +67,14 @@ class CarelevoPatchSafetyCheckUseCase @Inject constructor(
             }
             .onErrorReturn { SafetyProgress.Error(it) }
     }
+
+    /**
+     * Persist the safety-check pass (`checkSafety=true`) — extracted from [execute]'s SUCCESS mapping so
+     * the Phase-2 new-BLE-stack path reuses the exact same write. Returns false with no patch record or on
+     * a failed write.
+     */
+    fun persistSafetyChecked(): Boolean {
+        val patchInfo = patchInfoRepository.getPatchInfoBySync() ?: return false
+        return patchInfoRepository.updatePatchInfo(patchInfo.copy(checkSafety = true, updatedAt = DateTime.now()))
+    }
 }

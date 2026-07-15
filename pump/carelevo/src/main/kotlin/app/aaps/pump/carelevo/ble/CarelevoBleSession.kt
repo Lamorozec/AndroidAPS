@@ -2,10 +2,13 @@ package app.aaps.pump.carelevo.ble
 
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
+import app.aaps.pump.carelevo.ble.commands.BasalProgramCommand
 import app.aaps.pump.carelevo.ble.commands.InfusionInfoCommand
 import app.aaps.pump.carelevo.ble.commands.InfusionInfoResponse
 import app.aaps.pump.carelevo.ble.commands.PatchInfoCommand
 import app.aaps.pump.carelevo.ble.commands.PatchInfoResponse
+import app.aaps.pump.carelevo.ble.commands.SafetyCheckCommand
+import app.aaps.pump.carelevo.ble.commands.SafetyCheckResponse
 import app.aaps.pump.carelevo.ble.gatt.BleTransportGattConnection
 import app.aaps.pump.carelevo.ble.gatt.GattConnState
 import app.aaps.pump.carelevo.ble.gatt.GattEvent
@@ -16,6 +19,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeout
@@ -63,14 +67,38 @@ class CarelevoBleSession @Inject constructor(
         withSession(address, "infusion info") { it.request(InfusionInfoCommand()) }
 
     /** Run any single-response [command] (write or read) on a fresh new-transport session. */
-    suspend fun <R : BleResponse> runSingle(address: String, command: BleCommand<R>): R =
-        withSession(address, command::class.simpleName ?: "command") { it.request(command) }
+    suspend fun <R : BleResponse> runSingle(address: String, command: BleCommand<R>, timeoutMs: Long = READ_TIMEOUT_MS): R =
+        withSession(address, command::class.simpleName ?: "command", timeoutMs) { it.request(command) }
+
+    /**
+     * Run the streaming Safety Check (0x12 → 0x72). [onFrame] is invoked for every decoded frame (each
+     * progress report and the terminal SUCCESS/error) as the pump reports it; the stream completes on the
+     * terminal frame. Uses a long timeout — the check runs ~100-210 s.
+     */
+    suspend fun runSafetyCheck(address: String, onFrame: (SafetyCheckResponse) -> Unit) =
+        withSession(address, "safety check", SAFETY_CHECK_TIMEOUT_MS) { client ->
+            client.requestStream(SafetyCheckCommand()).collect { onFrame(it) }
+        }
+
+    /**
+     * Set the initial basal program (activation, 0x13 → 0x73). A full program is **three sequential
+     * [BasalProgramCommand]s** (seqNo 0, 1, 2) that MUST share ONE connection, so — unlike [runSingle] —
+     * all three run inside a single session. [programs] are the per-seqNo segment-speed lists (v2 sends
+     * speed only). Returns true only if every write reports `resultCode == 0`; short-circuits on the first
+     * failure (`all` stops early) so a rejected seqNo does not send the rest of a partial program.
+     */
+    suspend fun runBasalProgram(address: String, programs: List<List<Double>>): Boolean =
+        withSession(address, "basal program", BASAL_PROGRAM_TIMEOUT_MS) { client ->
+            programs.withIndex().all { (index, speeds) ->
+                client.request(BasalProgramCommand(isUpdate = false, seqNo = index, segmentSpeeds = speeds)).resultCode == RESULT_SUCCESS
+            }
+        }
 
     /**
      * Open a fresh connection, run [block] against the [BleClient], and close. Each call gets its own
      * adapter+client+scope — see the class KDoc for why (one-shot [BleTransportGattConnection.close]).
      */
-    private suspend fun <R> withSession(address: String, label: String, block: suspend (BleClient) -> R): R {
+    private suspend fun <R> withSession(address: String, label: String, timeoutMs: Long = READ_TIMEOUT_MS, block: suspend (BleClient) -> R): R {
         // BluetoothAdapter.getRemoteDevice requires an UPPERCASE MAC (lowercase throws
         // IllegalArgumentException); the stored address is lowercase, so normalize here.
         val mac = address.uppercase()
@@ -80,7 +108,7 @@ class CarelevoBleSession @Inject constructor(
         try {
             open(gatt, mac)
             aapsLogger.debug(LTag.PUMPCOMM, "bleSession: reading $label")
-            return withTimeout(READ_TIMEOUT_MS) { block(client) }
+            return withTimeout(timeoutMs) { block(client) }
         } finally {
             gatt.close()
             scope.cancel()
@@ -111,5 +139,12 @@ class CarelevoBleSession @Inject constructor(
 
         const val CONNECT_TIMEOUT_MS = 20_000L
         const val READ_TIMEOUT_MS = 15_000L
+
+        // Safety check streams progress for ~100-210 s before the terminal frame; give it headroom.
+        const val SAFETY_CHECK_TIMEOUT_MS = 250_000L
+
+        // Three sequential basal-program writes on one connection; generous headroom over READ_TIMEOUT_MS.
+        const val BASAL_PROGRAM_TIMEOUT_MS = 30_000L
+        private const val RESULT_SUCCESS = 0
     }
 }

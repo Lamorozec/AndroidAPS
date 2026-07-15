@@ -91,4 +91,23 @@ class AlarmClearPatchDiscardUseCase(
             )
         }.observeOn(Schedulers.io())
     }
+
+    /**
+     * Persist the alarm-triggered discard outcome (Phase-2 new-BLE-stack path reuse): ack the alarm, clear
+     * the user-setting sync flags, and delete the infusion + patch records — mirrors [execute]'s SUCCESS
+     * branch exactly. Returns false with no user-setting record or if any write fails.
+     */
+    fun persistAlarmDiscarded(alarmId: String): Boolean = runCatching {
+        alarmRepository.markAcknowledged(alarmId = alarmId, acknowledged = true, updatedAt = LocalDateTime.now().toString()).blockingAwait()
+
+        val userSettingInfo = userSettingInfoRepository.getUserSettingInfoBySync()
+            ?: throw NullPointerException("user setting info must be not null")
+        require(
+            userSettingInfoRepository.updateUserSettingInfo(
+                userSettingInfo.copy(updatedAt = DateTime.now(), needMaxBolusDoseSyncPatch = false, needMaxBasalSpeedSyncPatch = false, needLowInsulinNoticeAmountSyncPatch = false)
+            )
+        ) { "update user setting info is failed" }
+        require(infusionInfoRepository.deleteInfusionInfo()) { "delete infusion info is failed" }
+        require(patchInfoRepository.deletePatchInfo()) { "delete patch info is failed" }
+    }.isSuccess
 }

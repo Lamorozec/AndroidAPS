@@ -105,4 +105,16 @@ class CarelevoUpdateLowInsulinNoticeAmountUseCase @Inject constructor(
             )
         }.observeOn(Schedulers.io())
     }
+
+    /**
+     * Persist the low-insulin-notice setting for the Phase-2 new-BLE-stack path. [synced] = the patch
+     * confirmed the push; when false, `needLowInsulinNoticeAmountSyncPatch` stays true so the deferred-sync
+     * re-pushes on reconnect. Returns false with no setting record or on a failed write.
+     */
+    fun persistLowInsulinNoticeAmount(value: Int, synced: Boolean): Boolean {
+        val userSettingInfo = userSettingInfoRepository.getUserSettingInfoBySync() ?: return false
+        return userSettingInfoRepository.updateUserSettingInfo(
+            userSettingInfo.copy(updatedAt = DateTime.now(), lowInsulinNoticeAmount = value, needLowInsulinNoticeAmountSyncPatch = !synced)
+        )
+    }
 }
