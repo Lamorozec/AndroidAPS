@@ -2,16 +2,23 @@ package app.aaps.pump.carelevo.ble
 
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
+import app.aaps.pump.carelevo.ble.commands.AlertAlarmSetCommand
+import app.aaps.pump.carelevo.ble.commands.AppAuthCommand
 import app.aaps.pump.carelevo.ble.commands.BasalProgramCommand
 import app.aaps.pump.carelevo.ble.commands.InfusionInfoCommand
 import app.aaps.pump.carelevo.ble.commands.InfusionInfoResponse
+import app.aaps.pump.carelevo.ble.commands.MacAddressCommand
 import app.aaps.pump.carelevo.ble.commands.PatchInfoCommand
 import app.aaps.pump.carelevo.ble.commands.PatchInfoResponse
 import app.aaps.pump.carelevo.ble.commands.SafetyCheckCommand
 import app.aaps.pump.carelevo.ble.commands.SafetyCheckResponse
+import app.aaps.pump.carelevo.ble.commands.SetTimeForPatchInfoCommand
+import app.aaps.pump.carelevo.ble.commands.ThresholdSetupCommand
 import app.aaps.pump.carelevo.ble.gatt.BleTransportGattConnection
 import app.aaps.pump.carelevo.ble.gatt.GattConnState
 import app.aaps.pump.carelevo.ble.gatt.GattEvent
+import app.aaps.pump.carelevo.ext.checkSumV2
+import app.aaps.pump.carelevo.ext.convertHexToByteArray
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -19,12 +26,15 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
+import org.joda.time.DateTime
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Named
@@ -89,24 +99,110 @@ class CarelevoBleSession @Inject constructor(
         }
 
     /**
-     * Set the initial basal program (activation, 0x13 → 0x73). A full program is **three sequential
+     * Write a full basal program — the initial set (activation, 0x13 → 0x73, [isUpdate] = false) or the
+     * mid-therapy profile update (0x21 → 0x81, [isUpdate] = true; the V2 update sends the same 3-write
+     * shape as set, just under the change opcode). A full program is **three sequential
      * [BasalProgramCommand]s** (seqNo 0, 1, 2) that MUST share ONE connection, so — unlike [runSingle] —
      * all three run inside a single session. [programs] are the per-seqNo segment-speed lists (v2 sends
      * speed only). Returns true only if every write reports `resultCode == 0`; short-circuits on the first
      * failure (`all` stops early) so a rejected seqNo does not send the rest of a partial program.
      */
-    suspend fun runBasalProgram(address: String, programs: List<List<Double>>): Boolean =
+    suspend fun runBasalProgram(address: String, programs: List<List<Double>>, isUpdate: Boolean = false): Boolean =
         withSession(address, "basal program", BASAL_PROGRAM_TIMEOUT_MS) { client ->
             programs.withIndex().all { (index, speeds) ->
-                client.request(BasalProgramCommand(isUpdate = false, seqNo = index, segmentSpeeds = speeds)).resultCode == RESULT_SUCCESS
+                client.request(BasalProgramCommand(isUpdate = isUpdate, seqNo = index, segmentSpeeds = speeds)).resultCode == RESULT_SUCCESS
             }
         }
 
     /**
+     * Pair a factory-fresh patch — the new-stack replacement for the legacy
+     * `CarelevoConnectNewPatchUseCase` BLE sequence, all on ONE session: connect → **create the Android
+     * bond** ([ensureBond]; legacy `CarelevoBleMangerImpl` explicitly `createBond()`s after CONNECTED) →
+     * discover → enable notifications → MAC read (0x3B) → checksum app-auth (0x4B) → set-time→patch-info
+     * rounds (0x11 → 0x93+0x94, retried while the serial is empty, mirroring the legacy 2-round loop) →
+     * alert-alarm mode (0x48) → threshold bundle (0x1B). Persistence is NOT done here — the caller feeds
+     * the returned [PairingResult] to `CarelevoConnectNewPatchUseCase.persistNewPatch`.
+     */
+    suspend fun runPairing(address: String, spec: PairingSpec): PairingResult =
+        withSession(address, "pairing", PAIRING_TIMEOUT_MS, ensureBond = true) { client ->
+            val key = (0..255).random()
+            val macResponse = client.request(MacAddressCommand(key.toByte()))
+            // Legacy persists the colon MAC in lowercase (convertBytesToHex is "0x%02x"); keep parity.
+            val colonMac = macResponse.macAddress.lowercase().chunked(2).joinToString(":")
+            aapsLogger.debug(LTag.PUMPCOMM, "bleSession: pairing MAC=$colonMac")
+            val checkSumByte = (macResponse.macAddress + macResponse.checkSum).convertHexToByteArray().checkSumV2(key)
+            val auth = client.request(AppAuthCommand(checkSumByte.toUByte().toInt()))
+            check(auth.resultCode == RESULT_SUCCESS) { "app auth failed result=${auth.resultCode}" }
+
+            var patchInfo: PatchInfoResponse? = null
+            for (round in 1..PATCH_INFO_ROUND_RETRY_COUNT) {
+                val info = withTimeoutOrNull(PATCH_INFO_ROUND_TIMEOUT_MS) {
+                    client.requestMultiple(SetTimeForPatchInfoCommand(subId = 0, volume = spec.volume, aidMode = 0, dateTime = DateTime.now()))
+                }
+                if (info != null && info.serialResultCode == RESULT_SUCCESS && info.serialNumber.trim().isNotEmpty() && info.detailResultCode == RESULT_SUCCESS) {
+                    patchInfo = info
+                    break
+                }
+                aapsLogger.warn(
+                    LTag.PUMPCOMM,
+                    "bleSession: invalid patch info round=$round/$PATCH_INFO_ROUND_RETRY_COUNT " +
+                        "result=${info?.serialResultCode} serial=${info?.serialNumber?.trim()} detailResult=${info?.detailResultCode}"
+                )
+            }
+            val info = patchInfo ?: throw IllegalStateException("patch info invalid after $PATCH_INFO_ROUND_RETRY_COUNT rounds")
+
+            val alarm = client.request(AlertAlarmSetCommand(ALERT_ALARM_MODE_DEFAULT))
+            check(alarm.resultCode == RESULT_SUCCESS) { "alert alarm set failed result=${alarm.resultCode}" }
+            val threshold = client.request(
+                ThresholdSetupCommand(
+                    insulinRemainsThreshold = spec.remains,
+                    expiryThreshold = spec.expiry,
+                    maxBasalSpeed = spec.maxBasalSpeed,
+                    maxBolusDose = spec.maxBolusDose,
+                    buzzUse = spec.buzzUse
+                )
+            )
+            check(threshold.resultCode == RESULT_SUCCESS) { "threshold setup failed result=${threshold.resultCode}" }
+
+            PairingResult(
+                address = colonMac,
+                serialNumber = info.serialNumber.trim(),
+                firmwareVersion = info.firmwareVersion,
+                modelName = info.modelName
+            )
+        }
+
+    /** Inputs of the activation threshold/set-time writes — mirrors legacy `CarelevoConnectNewPatchRequestModel`. */
+    data class PairingSpec(
+        val volume: Int,
+        val remains: Int,
+        val expiry: Int,
+        val maxBasalSpeed: Double,
+        val maxBolusDose: Double,
+        val buzzUse: Boolean
+    )
+
+    /** Identity of the freshly paired patch, decoded from the 0x9B + 0x93/0x94 responses. */
+    data class PairingResult(
+        val address: String,
+        val serialNumber: String,
+        val firmwareVersion: String,
+        val modelName: String
+    )
+
+    /**
      * Open a fresh connection, run [block] against the [BleClient], and close. Each call gets its own
      * adapter+client+scope — see the class KDoc for why (one-shot [BleTransportGattConnection.close]).
+     * [ensureBond] (pairing only) creates the Android bond after CONNECTED, before discovery — the legacy
+     * manager's order.
      */
-    private suspend fun <R> withSession(address: String, label: String, timeoutMs: Long = READ_TIMEOUT_MS, block: suspend (BleClient) -> R): R =
+    private suspend fun <R> withSession(
+        address: String,
+        label: String,
+        timeoutMs: Long = READ_TIMEOUT_MS,
+        ensureBond: Boolean = false,
+        block: suspend (BleClient) -> R
+    ): R =
         sessionMutex.withLock {
             // BluetoothAdapter.getRemoteDevice requires an UPPERCASE MAC (lowercase throws
             // IllegalArgumentException); the stored address is lowercase, so normalize here.
@@ -120,7 +216,8 @@ class CarelevoBleSession @Inject constructor(
                 // would otherwise suspend forever HERE while holding sessionMutex, wedging every later new-stack
                 // op — including a delivery-critical out-of-band bolus cancel. On timeout the finally closes the
                 // gatt (aborting the pending ack) and releases the mutex.
-                withTimeout(CONNECT_TIMEOUT_MS) { open(gatt, mac) }
+                val openTimeoutMs = if (ensureBond) CONNECT_TIMEOUT_MS + BOND_TIMEOUT_MS else CONNECT_TIMEOUT_MS
+                withTimeout(openTimeoutMs) { open(gatt, mac, ensureBond) }
                 aapsLogger.debug(LTag.PUMPCOMM, "bleSession: reading $label")
                 withTimeout(timeoutMs) { block(client) }
             } finally {
@@ -129,7 +226,7 @@ class CarelevoBleSession @Inject constructor(
             }
         }
 
-    private suspend fun open(gatt: BleTransportGattConnection, address: String) = coroutineScope {
+    private suspend fun open(gatt: BleTransportGattConnection, address: String, ensureBond: Boolean = false) = coroutineScope {
         // Subscribe to the CONNECTED event BEFORE calling connect() so the state change cannot race
         // ahead of our collector. UNDISPATCHED runs the async body up to the flow subscription
         // synchronously, guaranteeing the subscription is live before connect() fires.
@@ -143,6 +240,16 @@ class CarelevoBleSession @Inject constructor(
         aapsLogger.debug(LTag.PUMPCOMM, "bleSession: connecting to $address")
         require(gatt.connect(address)) { "bleSession: connect() refused for $address" }
         connected.await()
+        if (ensureBond && !transport.adapter.isDeviceBonded(address)) {
+            // Legacy CarelevoBleMangerImpl explicitly createBond()s right after STATE_CONNECTED; the
+            // transport exposes no bond-state callback, so poll isDeviceBonded until the SMP completes.
+            aapsLogger.debug(LTag.PUMPCOMM, "bleSession: creating bond")
+            transport.adapter.createBond(address)
+            withTimeout(BOND_TIMEOUT_MS) {
+                while (!transport.adapter.isDeviceBonded(address)) delay(BOND_POLL_MS)
+            }
+            aapsLogger.debug(LTag.PUMPCOMM, "bleSession: bonded")
+        }
         aapsLogger.debug(LTag.PUMPCOMM, "bleSession: connected; discovering services")
         gatt.discoverServices()
         gatt.enableNotifications(notifyUuid)
@@ -160,5 +267,16 @@ class CarelevoBleSession @Inject constructor(
         // Three sequential basal-program writes on one connection; generous headroom over READ_TIMEOUT_MS.
         const val BASAL_PROGRAM_TIMEOUT_MS = 30_000L
         private const val RESULT_SUCCESS = 0
+
+        // Pairing: MAC read + auth + up to 2 patch-info rounds (10 s each, matching the legacy
+        // PATCH_EVENT_TIMEOUT_SEC) + alarm + threshold; bond wait is bounded separately in open().
+        const val PAIRING_TIMEOUT_MS = 45_000L
+        private const val PATCH_INFO_ROUND_RETRY_COUNT = 2
+        private const val PATCH_INFO_ROUND_TIMEOUT_MS = 10_000L
+        private const val BOND_TIMEOUT_MS = 15_000L
+        private const val BOND_POLL_MS = 250L
+
+        // Legacy sends SetAlertAlarmModeRequest(0) during activation.
+        private const val ALERT_ALARM_MODE_DEFAULT = 0
     }
 }

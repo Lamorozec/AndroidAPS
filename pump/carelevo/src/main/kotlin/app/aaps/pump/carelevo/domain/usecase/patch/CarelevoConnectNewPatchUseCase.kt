@@ -252,6 +252,39 @@ class CarelevoConnectNewPatchUseCase @Inject constructor(
         return patchInfo to patchDetail
     }
 
+    /**
+     * Persist the freshly paired patch — extracted from [execute]'s post-BLE branch so the Phase-2
+     * new-stack pairing (`CarelevoBleSession.runPairing`) reuses the exact same write. [bootDateTime] is
+     * fabricated from the phone clock exactly like the legacy RPT2 parser does (the value is never on the
+     * wire — `CarelevoProtocolPatchInformationInquiryDetailParserImpl` stamps `DateTime()` as `yyMMddHHmm`).
+     * Returns false if the DB write fails.
+     */
+    fun persistNewPatch(
+        address: String,
+        serialNumber: String,
+        firmwareVersion: String,
+        modelName: String,
+        request: CarelevoConnectNewPatchRequestModel
+    ): Boolean {
+        val bootDateTime = LocalDateTime.now().format(BOOT_DATE_TIME_FORMATTER)
+        return patchInfoRepository.updatePatchInfo(
+            CarelevoPatchInfoDomainModel(
+                address = address,
+                manufactureNumber = serialNumber,
+                firmwareVersion = firmwareVersion,
+                bootDateTime = bootDateTime,
+                bootDateTimeUtcMillis = parseBootDateTimeUtcMillis(bootDateTime),
+                modelName = modelName,
+                insulinAmount = request.volume,
+                insulinRemain = request.volume.toDouble(),
+                thresholdInsulinRemain = request.remains,
+                thresholdExpiry = request.expiry,
+                thresholdMaxBasalSpeed = request.maxBasalSpeed,
+                thresholdMaxBolusDose = request.maxVolume
+            )
+        )
+    }
+
     private fun generateRandomKey(range: ClosedRange<Int>): Int {
         return range.run {
             (Math.random() * (endInclusive - start + 1) + start).toInt()

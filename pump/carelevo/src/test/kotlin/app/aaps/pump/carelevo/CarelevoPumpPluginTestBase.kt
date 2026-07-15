@@ -173,6 +173,8 @@ abstract class CarelevoPumpPluginTestBase {
             rh = rh,
             pumpEnactResultProvider = pumpEnactResultProvider,
             carelevoPatch = carelevoPatch,
+            preferences = preferences,
+            gateway = newStackGateway,
             setBasalProgramUseCase = setBasalProgramUseCase,
             updateBasalProgramUseCase = updateBasalProgramUseCase
         )

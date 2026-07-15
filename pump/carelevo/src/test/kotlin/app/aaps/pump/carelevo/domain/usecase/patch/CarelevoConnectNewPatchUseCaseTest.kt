@@ -95,6 +95,53 @@ internal class CarelevoConnectNewPatchUseCaseTest {
         assertThat(captor.firstValue.bootDateTimeUtcMillis).isNotNull()
     }
 
+    @Test
+    fun persistNewPatch_writes_pairing_identity_and_fabricated_boot_time() {
+        whenever(patchInfoRepository.updatePatchInfo(any())).thenReturn(true)
+
+        val persisted = sut.persistNewPatch(
+            address = "94:b2:16:1d:2f:6d",
+            serialNumber = "EO12507099001",
+            firmwareVersion = "T168",
+            modelName = "6776514848",
+            request = request
+        )
+
+        assertThat(persisted).isTrue()
+        val captor = argumentCaptor<CarelevoPatchInfoDomainModel>()
+        verify(patchInfoRepository).updatePatchInfo(captor.capture())
+        with(captor.firstValue) {
+            assertThat(address).isEqualTo("94:b2:16:1d:2f:6d")
+            assertThat(manufactureNumber).isEqualTo("EO12507099001")
+            assertThat(firmwareVersion).isEqualTo("T168")
+            assertThat(modelName).isEqualTo("6776514848")
+            assertThat(insulinAmount).isEqualTo(300)
+            assertThat(insulinRemain).isEqualTo(300.0)
+            assertThat(thresholdInsulinRemain).isEqualTo(30)
+            assertThat(thresholdExpiry).isEqualTo(120)
+            assertThat(thresholdMaxBasalSpeed).isEqualTo(15.0)
+            assertThat(thresholdMaxBolusDose).isEqualTo(25.0)
+            // Fabricated from the phone clock as yyMMddHHmm (legacy RPT2-parser parity) and parseable back.
+            assertThat(bootDateTime).hasLength(10)
+            assertThat(bootDateTimeUtcMillis).isNotNull()
+        }
+    }
+
+    @Test
+    fun persistNewPatch_returns_false_when_repository_write_fails() {
+        whenever(patchInfoRepository.updatePatchInfo(any())).thenReturn(false)
+
+        val persisted = sut.persistNewPatch(
+            address = "94:b2:16:1d:2f:6d",
+            serialNumber = "EO12507099001",
+            firmwareVersion = "T168",
+            modelName = "6776514848",
+            request = request
+        )
+
+        assertThat(persisted).isFalse()
+    }
+
     // Test setup uses a single shared ReplaySubject across both retry rounds, which causes
     // round-1 events to be replayed to round-2 subscribers and the retry logic to fail.
     // The production code itself is correct (each BLE round produces fresh emissions);

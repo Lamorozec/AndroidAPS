@@ -37,6 +37,18 @@ class CarelevoNewStackGateway @Inject constructor(
         return bleSession.runSingle(address, command, timeoutMs)
     }
 
+    /**
+     * Drop the legacy link → settle → write a full 3-write basal program on ONE fresh session (see
+     * [CarelevoBleSession.runBasalProgram]). [isUpdate] = false for the activation set (0x13), true for the
+     * mid-therapy profile update (0x21). Returns true only if all three writes report success.
+     */
+    suspend fun runBasalProgram(address: String, programs: List<List<Double>>, isUpdate: Boolean): Boolean {
+        connectionCoordinator.disconnect(NEW_BLE_SESSION_REASON)
+        aapsLogger.debug(LTag.PUMPCOMM, "newStackGateway: dropped legacy link, settling before basal program (isUpdate=$isUpdate)")
+        delay(NEW_BLE_SETTLE_MS)
+        return bleSession.runBasalProgram(address, programs, isUpdate)
+    }
+
     companion object {
 
         const val NEW_BLE_SESSION_REASON = "new-ble-session"

@@ -251,6 +251,39 @@ whole driver):**
   persistent-connection rewire needed), sequenced D1 temp-basal → D2 extended → D3 immediate-bolus; bolus cancel
   = Option A (per-op cancel session).
 - **2.D — Delete legacy + flag + RxJava; re-enable the disabled patch-info test on `BleClient`.**
+  Staged (decided 2026-07-15, gaps first, deletion behind a hardware gate):
+  - **2.D-0a — `updateBasalProfile` gap ✅ BUILT + DEVICE-VALIDATED (2026-07-15, profile switch on the Pixel).** The mid-therapy basal reprogram (0x21) had NO
+    flag branch — `CarelevoBasalProfileUpdateCoordinator` ran legacy even with the flag on. Now flag-gated like
+    the rest: `gateway.runBasalProgram(address, programs, isUpdate = true)` (session `runBasalProgram` gained
+    `isUpdate`; V2 update = same 3-write shape as set under 0x21→0x81 — the 0x22/0x82 "additional" opcodes are
+    the dead V1 path). Persist reuses `CarelevoSetBasalProgramUseCase.buildBasalProgramPlan/persistBasalProgram`
+    (the update use case's persist is byte-identical). Outer Rx timeout 20 s → 60 s on the new branch (fresh
+    session worst case ≈ 51 s; internal timeouts fire first).
+  - **2.D-0b — pairing migration ✅ BUILT + DEVICE-VALIDATED (2026-07-15, real patch change on the Pixel — scan/bond/pair all over the new stack).**
+    `CarelevoBleSession.runPairing(address, spec)` = ONE session doing connect → **explicit `createBond` after
+    CONNECTED** (legacy manager parity; poll `isDeviceBonded`, 15 s bound) → discover → notify → MAC 0x3B →
+    checksum auth 0x4B (`(macHex+checkSumHex).convertHexToByteArray().checkSumV2(key)`) → set-time→patch-info
+    0x11→{0x93,0x94} (2 rounds × 10 s, `withTimeoutOrNull`, retry while serial empty — the legacy round loop) →
+    alert-alarm 0x48(0) → threshold bundle 0x1B. Persist extracted to
+    `CarelevoConnectNewPatchUseCase.persistNewPatch` (colon MAC stored **lowercase** like legacy
+    `convertBytesToHex`; `bootDateTime` fabricated `yyMMddHHmm` from the phone clock — legacy RPT2-parser
+    parity, never on the wire). Scan: `CarelevoBleTransportImpl`'s scanner already had a discovery mode
+    (`scanAddress = null` → service-UUID filter); the wizard VM (flag-gated `startScanViaNewStack` /
+    `startConnectViaNewStack`) collects the first `scannedDevices` hit (early-stop) and needs NO btState
+    observer — the session owns its handshake. Legacy path untouched behind flag-off.
+  - **2.D-1 — the deletion (UNBLOCKED 2026-07-15 — 2.D-0b validated on a real patch change).** Delete the legacy core
+    (`CarelevoBleMangerImpl`/Controller/Source + `CarelevoPatchObserver` + 3 Bt remote datasources), all 23+
+    flag branches + the flag key, the 13 `awaitOnIo` sites, the 21 `blockingFirst` use-case bodies (persist
+    methods stay), rewrite ~22 legacy-mocking tests, re-enable the `@Disabled` retry test against the new
+    stack. **Connection model DECIDED: queue-owned new-stack link** (user choice over Omnipod-style
+    always-connected): port connect-before-execute to the new transport — the queue dials ONE long-lived
+    new-stack session, ops run over the open client, idle-disconnect keeps the 5 s keep-alive, and a
+    long-lived `unsolicitedEvents → CarelevoPatch` bridge rides the connection windows (this pulls D4's core
+    into 2.D-1; closes the alarms-during-session gap and keeps connection state visible in the UI).
+  - **RxJava dep removal is NOT 2.D** — 92 files import `io.reactivex` (CarelevoPatch BehaviorSubjects, 6
+    ViewModels, DB datasources). Deleting the legacy stack removes the dangerous Rx (lost-event correlation);
+    the dependency itself goes with roadmap steps 5/7 (BehaviorSubject→StateFlow + VM conversions) as a
+    follow-on.
 - **Emulator** (parallel) makes 2.B/2.C CI-testable without hardware.
 
 Open questions from 2.A — RESOLVED on device: **auth-on-reconnect = none needed** (a fresh GATT read succeeded

@@ -5,16 +5,21 @@ import app.aaps.core.interfaces.logging.LTag
 import app.aaps.core.interfaces.profile.Profile
 import app.aaps.core.interfaces.pump.PumpEnactResult
 import app.aaps.core.interfaces.resources.ResourceHelper
+import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.pump.carelevo.R
+import app.aaps.pump.carelevo.ble.CarelevoNewStackGateway
 import app.aaps.pump.carelevo.common.CarelevoPatch
+import app.aaps.pump.carelevo.common.keys.CarelevoBooleanPreferenceKey
 import app.aaps.pump.carelevo.domain.model.ResponseResult
 import app.aaps.pump.carelevo.domain.model.infusion.CarelevoInfusionInfoDomainModel
+import app.aaps.pump.carelevo.domain.model.result.ResultSuccess
 import app.aaps.pump.carelevo.domain.usecase.CarelevoUseCaseResponse
 import app.aaps.pump.carelevo.domain.usecase.basal.CarelevoSetBasalProgramUseCase
 import app.aaps.pump.carelevo.domain.usecase.basal.CarelevoUpdateBasalProgramUseCase
 import app.aaps.pump.carelevo.domain.usecase.basal.model.SetBasalProgramRequestModel
 import io.reactivex.rxjava3.core.Flowable
 import io.reactivex.rxjava3.core.Single
+import kotlinx.coroutines.runBlocking
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Provider
@@ -27,9 +32,20 @@ class CarelevoBasalProfileUpdateCoordinator @Inject constructor(
     private val rh: ResourceHelper,
     private val pumpEnactResultProvider: Provider<PumpEnactResult>,
     private val carelevoPatch: CarelevoPatch,
+    private val preferences: Preferences,
+    private val gateway: CarelevoNewStackGateway,
     private val setBasalProgramUseCase: CarelevoSetBasalProgramUseCase,
     private val updateBasalProgramUseCase: CarelevoUpdateBasalProgramUseCase
 ) {
+
+    private companion object {
+
+        private const val LEGACY_TIMEOUT_SEC = 20L
+
+        // Fresh-session worst case: 1 s settle + ≤20 s connect handshake + ≤30 s for the three program
+        // writes — the session's own withTimeouts fire first, this is only the outer backstop.
+        private const val NEW_STACK_TIMEOUT_SEC = 60L
+    }
 
     private var lastProfileUpdateAttemptMs: Long = 0
 
@@ -68,7 +84,11 @@ class CarelevoBasalProfileUpdateCoordinator @Inject constructor(
             }
             .flatMap {
                 if (!it.success) throw IllegalStateException("cancelTempBasal failed")
-                executeBasalProgram(profile, shouldUseSetBasalProgram).timeout(20, TimeUnit.SECONDS)
+                // The new-stack branch opens a fresh session (connect ≤20 s + three writes ≤30 s), so the
+                // legacy 20 s backstop would kill a slow-but-succeeding program mid-write; its own internal
+                // timeouts fire first, this outer one is only a safety net.
+                val timeoutSec = if (preferences.get(CarelevoBooleanPreferenceKey.CARELEVO_USE_NEW_BLE_STACK)) NEW_STACK_TIMEOUT_SEC else LEGACY_TIMEOUT_SEC
+                executeBasalProgram(profile, shouldUseSetBasalProgram).timeout(timeoutSec, TimeUnit.SECONDS)
             }
             .onErrorReturn { ResponseResult.Error(it) }
             .blockingGet()
@@ -122,6 +142,11 @@ class CarelevoBasalProfileUpdateCoordinator @Inject constructor(
         profile: Profile,
         shouldUseSetBasalProgram: Boolean
     ): Single<ResponseResult<CarelevoUseCaseResponse>> {
+        if (preferences.get(CarelevoBooleanPreferenceKey.CARELEVO_USE_NEW_BLE_STACK)) {
+            aapsLogger.debug(LTag.PUMPCOMM, "executeBasalProgram mode=${if (shouldUseSetBasalProgram) "SET" else "UPDATE"} stack=new")
+            return Single.fromCallable { executeBasalProgramViaNewStack(profile, isUpdate = !shouldUseSetBasalProgram) }
+        }
+
         val request = SetBasalProgramRequestModel(profile)
 
         return if (shouldUseSetBasalProgram) {
@@ -132,6 +157,31 @@ class CarelevoBasalProfileUpdateCoordinator @Inject constructor(
             updateBasalProgramUseCase.execute(request)
         }
     }
+
+    /**
+     * Phase-2 basal (re)program over the new stack (flag-gated, **delivery-critical**). Same 3-write
+     * single-session plan as the activation set-basal in `CarelevoActivationExecutor.runSetBasalViaNewStack`,
+     * with [isUpdate] selecting the change opcode (0x21) instead of the set opcode (0x13). The V2 update's
+     * persist is byte-identical to set's, so both modes reuse [CarelevoSetBasalProgramUseCase]'s
+     * `buildBasalProgramPlan` + `persistBasalProgram` (mode=1 + basal infusion-info).
+     */
+    private fun executeBasalProgramViaNewStack(profile: Profile, isUpdate: Boolean): ResponseResult<CarelevoUseCaseResponse> = runCatching<CarelevoUseCaseResponse> {
+        val address = carelevoPatch.getPatchInfoAddress()
+            ?: throw IllegalStateException("no patch address")
+        val plan = setBasalProgramUseCase.buildBasalProgramPlan(profile)
+        val programmed = runBlocking { gateway.runBasalProgram(address, plan.programs, isUpdate) }
+        if (!programmed) throw IllegalStateException("basal program write failed")
+        val persisted = setBasalProgramUseCase.persistBasalProgram(plan.segments)
+        aapsLogger.info(LTag.PUMPCOMM, "newBle.basalProfile isUpdate=$isUpdate programmed=true persisted=$persisted")
+        if (!persisted) throw IllegalStateException("basal program persist failed")
+        ResultSuccess
+    }.fold(
+        onSuccess = { ResponseResult.Success(it) },
+        onFailure = {
+            aapsLogger.error(LTag.PUMPCOMM, "newBle.basalProfile FAILED isUpdate=$isUpdate", it)
+            ResponseResult.Error(it)
+        }
+    )
 
     private fun cancelExtendedBolusRx(
         infusionInfo: CarelevoInfusionInfoDomainModel?,

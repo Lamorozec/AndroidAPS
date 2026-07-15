@@ -7,7 +7,11 @@ import app.aaps.core.interfaces.logging.LTag
 import app.aaps.core.interfaces.queue.CommandQueue
 import app.aaps.core.interfaces.rx.AapsSchedulers
 import app.aaps.core.interfaces.sharedPreferences.SP
+import app.aaps.core.interfaces.pump.ble.ScannedDevice as TransportScannedDevice
+import app.aaps.core.keys.interfaces.Preferences
+import app.aaps.pump.carelevo.ble.CarelevoBleSession
 import app.aaps.pump.carelevo.ble.CarelevoBleSource
+import app.aaps.pump.carelevo.ble.CarelevoBleTransport
 import app.aaps.pump.carelevo.ble.core.CarelevoBleController
 import app.aaps.pump.carelevo.ble.core.Connect
 import app.aaps.pump.carelevo.ble.core.DiscoveryService
@@ -44,9 +48,15 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import io.reactivex.rxjava3.core.Completable
 import io.reactivex.rxjava3.disposables.CompositeDisposable
 import io.reactivex.rxjava3.kotlin.plusAssign
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
@@ -61,6 +71,9 @@ class CarelevoPatchConnectViewModel @Inject constructor(
     private val bleController: CarelevoBleController,
     private val commandQueue: CommandQueue,
     private val sp: SP,
+    private val preferences: Preferences,
+    private val bleSession: CarelevoBleSession,
+    private val transport: CarelevoBleTransport,
     private val connectNewPatchUseCase: CarelevoConnectNewPatchUseCase,
     private val patchForceDiscardUseCase: CarelevoPatchForceDiscardUseCase,
     @Named("characterTx") private val txUuid: UUID
@@ -68,6 +81,9 @@ class CarelevoPatchConnectViewModel @Inject constructor(
 
     private var _selectedDevice: ScannedDevice? = null
     val selectedDevice get() = _selectedDevice
+
+    // Device found by the new-stack discovery scan (flag-on path); the legacy path keeps _selectedDevice.
+    private var _selectedNewStackDevice: TransportScannedDevice? = null
 
     private var _isScanWorking = false
     val isScanWorking get() = _isScanWorking
@@ -140,6 +156,10 @@ class CarelevoPatchConnectViewModel @Inject constructor(
             triggerEvent(CarelevoConnectPrepareEvent.ShowMessageScanIsWorking)
             return
         }
+        if (preferences.get(CarelevoBooleanPreferenceKey.CARELEVO_USE_NEW_BLE_STACK)) {
+            startScanViaNewStack()
+            return
+        }
 
         setUiState(UiState.Loading)
         compositeDisposable += bleController.execute(StartScan())
@@ -151,6 +171,39 @@ class CarelevoPatchConnectViewModel @Inject constructor(
                 setUiState(UiState.Idle)
                 stopScan()
             }
+    }
+
+    /**
+     * Phase-2 discovery scan over the new transport (flag-gated). `scanAddress = null` puts
+     * `CarelevoBleTransportImpl`'s scanner in service-UUID discovery mode (built for this wizard); the
+     * first advertising patch wins — the legacy scan likewise auto-picks its top result. Stops early on a
+     * hit instead of always burning the full window.
+     */
+    private fun startScanViaNewStack() {
+        setUiState(UiState.Loading)
+        _isScanWorking = true
+        viewModelScope.launch(Dispatchers.IO) {
+            val found = try {
+                transport.scanAddress = null
+                withTimeoutOrNull(NEW_STACK_SCAN_TIMEOUT_MS) {
+                    transport.scanner.scannedDevices
+                        // Subscribe BEFORE starting the scan so an immediate advertisement cannot be missed.
+                        .onSubscription { transport.scanner.startScan() }
+                        .first()
+                }
+            } finally {
+                transport.scanner.stopScan()
+                _isScanWorking = false
+            }
+            aapsLogger.info(LTag.PUMPCOMM, "newBle.scan found=${found?.name} address=${found?.address}")
+            _selectedNewStackDevice = found
+            setUiState(UiState.Idle)
+            if (found != null) {
+                triggerEvent(CarelevoConnectPrepareEvent.ShowConnectDialog)
+            } else {
+                triggerEvent(CarelevoConnectPrepareEvent.ShowMessageScanFailed)
+            }
+        }
     }
 
     private fun stopScan() {
@@ -230,6 +283,10 @@ class CarelevoPatchConnectViewModel @Inject constructor(
         aapsLogger.debug(LTag.PUMPCOMM, "startConnectTest called")
         if (!bleController.isBluetoothEnabled()) {
             triggerEvent(CarelevoConnectPrepareEvent.ShowMessageBluetoothNotEnabled)
+            return
+        }
+        if (preferences.get(CarelevoBooleanPreferenceKey.CARELEVO_USE_NEW_BLE_STACK)) {
+            startConnectViaNewStack(inputInsulin)
             return
         }
         if (selectedDevice == null) {
@@ -338,6 +395,75 @@ class CarelevoPatchConnectViewModel @Inject constructor(
         setUiState(UiState.Idle)
     }
 
+    /**
+     * Phase-2 pairing over the new stack (flag-gated): clear any stale bond (legacy `clearBond` parity) →
+     * one `CarelevoBleSession.runPairing` session (connect → bond → MAC/auth/set-time→patch-info/alarm/
+     * threshold) → persist via the use case's extracted `persistNewPatch`. No btState observer needed —
+     * the session owns its connect handshake and either returns or throws. After success the CommandQueue
+     * (activation customCommands) takes over exactly as on the legacy path.
+     */
+    private fun startConnectViaNewStack(inputInsulin: Int) {
+        val device = _selectedNewStackDevice
+        if (device == null) {
+            triggerEvent(CarelevoConnectPrepareEvent.ShowMessageSelectedDeviceIseEmpty)
+            return
+        }
+        val userSettingInfo = carelevoPatch.userSettingInfo.value?.getOrNull()
+        if (userSettingInfo == null) {
+            triggerEvent(CarelevoConnectPrepareEvent.ShowMessageNotSetUserSettingInfo)
+            return
+        }
+        val request = CarelevoConnectNewPatchRequestModel(
+            volume = inputInsulin,
+            expiry = sp.getInt(CarelevoIntPreferenceKey.CARELEVO_PATCH_EXPIRATION_REMINDER_HOURS.key, 116),
+            remains = userSettingInfo.lowInsulinNoticeAmount!!,
+            maxBasalSpeed = userSettingInfo.maxBasalSpeed!!,
+            maxVolume = userSettingInfo.maxBolusDose!!,
+            isBuzzOn = sp.getBoolean(CarelevoBooleanPreferenceKey.CARELEVO_BUZZER_REMINDER.key, false)
+        )
+
+        setUiState(UiState.Loading)
+        viewModelScope.launch(Dispatchers.IO) {
+            val outcome = runCatching {
+                transport.adapter.removeBond(device.address)
+                delay(commandDelay)
+                val pairing = bleSession.runPairing(
+                    device.address,
+                    CarelevoBleSession.PairingSpec(
+                        volume = request.volume,
+                        remains = request.remains,
+                        expiry = request.expiry,
+                        maxBasalSpeed = request.maxBasalSpeed,
+                        maxBolusDose = request.maxVolume,
+                        buzzUse = request.isBuzzOn
+                    )
+                )
+                check(
+                    connectNewPatchUseCase.persistNewPatch(
+                        address = pairing.address,
+                        serialNumber = pairing.serialNumber,
+                        firmwareVersion = pairing.firmwareVersion,
+                        modelName = pairing.modelName,
+                        request = request
+                    )
+                ) { "persist new patch failed" }
+                pairing
+            }
+            setUiState(UiState.Idle)
+            outcome.fold(
+                onSuccess = { pairing ->
+                    aapsLogger.info(LTag.PUMPCOMM, "newBle.pairing OK serial=${pairing.serialNumber} address=${pairing.address}")
+                    triggerEvent(CarelevoConnectPrepareEvent.ConnectComplete)
+                },
+                onFailure = { e ->
+                    if (e is CancellationException) throw e
+                    aapsLogger.error(LTag.PUMPCOMM, "newBle.pairing FAILED", e)
+                    triggerEvent(CarelevoConnectPrepareEvent.ConnectFailed)
+                }
+            )
+        }
+    }
+
     private fun connectNewPatch(inputInsulin: Int) {
         aapsLogger.debug(LTag.PUMPCOMM, "connectNewPatch called")
 
@@ -412,9 +538,17 @@ class CarelevoPatchConnectViewModel @Inject constructor(
 
     fun resetForEnterStep() {
         _selectedDevice = null
+        _selectedNewStackDevice = null
         _isScanWorking = false
         bleController.clearScan()
         setUiState(UiState.Idle)
         connectDisposable.clear()
+    }
+
+    private companion object {
+
+        // Legacy scans a fixed 10 s window (Thread.sleep in startScan); same budget, but the new-stack
+        // scan completes early on the first hit.
+        private const val NEW_STACK_SCAN_TIMEOUT_MS = 10_000L
     }
 }

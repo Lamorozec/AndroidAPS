@@ -33,6 +33,10 @@ use cases → legacy Rx BLE*, NOT through the executor `customCommand` path:
 > **Note on set-basal:** the *activation* set-basal (0x13, initial program) is already migrated via the
 > executor. The *mid-therapy* profile **update** (0x21) above is a separate delivery-path op and is in scope
 > here (it also cancels a running TBR/extended bolus first via lambdas).
+> **✅ DONE + DEVICE-VALIDATED (2026-07-15, 2.D-0a, profile switch):** `CarelevoBasalProfileUpdateCoordinator.executeBasalProgram`
+> is flag-gated → `gateway.runBasalProgram(…, isUpdate = !shouldUseSetBasalProgram)`; persist reuses
+> `CarelevoSetBasalProgramUseCase.buildBasalProgramPlan/persistBasalProgram` (identical to the update use
+> case's); outer timeout 20 s → 60 s on the new branch.
 
 ---
 
