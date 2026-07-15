@@ -40,27 +40,8 @@ class CarelevoPumpResumeUseCase @Inject constructor(
                     throw IllegalStateException("request pump resume result is failed: ${requestResumePumpResult.result}")
                 }
 
-                val infusionInfo = infusionInfoRepository.getInfusionInfoBySync()
-                    ?: throw NullPointerException("infusion info must be not null")
-                val basalInfusionInfo = infusionInfo.basalInfusionInfo
-                    ?: throw NullPointerException("basal infusion info must be not null")
-
-                val updateInfusionInfoResult = infusionInfoRepository.updateBasalInfusionInfo(
-                    basalInfusionInfo.copy(updatedAt = DateTime.now(), mode = 1, isStop = false)
-                )
-
-                if (!updateInfusionInfoResult) {
-                    throw IllegalStateException("update infusion info is failed")
-                }
-
-                val patchInfo = patchInfoRepository.getPatchInfoBySync()
-                    ?: throw NullPointerException("patch info must be not null")
-
-                val updatePatchInfoResult = patchInfoRepository.updatePatchInfo(
-                    patchInfo.copy(isStopped = false, stopMinutes = null, stopMode = null, isForceStopped = null, mode = 1)
-                )
-                if (!updatePatchInfoResult) {
-                    throw IllegalStateException("update patch info is failed")
+                if (!persistResumed()) {
+                    throw IllegalStateException("update resume state is failed")
                 }
                 ResultSuccess
             }.fold(
@@ -72,5 +53,20 @@ class CarelevoPumpResumeUseCase @Inject constructor(
                 }
             )
         }.observeOn(Schedulers.io())
+    }
+
+    /**
+     * Persist the resumed state (basalInfusionInfo `mode=1,isStop=false` + patchInfo `isStopped=false, …`)
+     * after a successful pump-resume. Extracted from [execute] so the Phase-2 new-BLE-stack path (the
+     * executor's `bleClient` resume write) reuses the exact same persistence. Returns `false` on any
+     * missing record or failed write.
+     */
+    fun persistResumed(): Boolean {
+        val basalInfusionInfo = infusionInfoRepository.getInfusionInfoBySync()?.basalInfusionInfo ?: return false
+        if (!infusionInfoRepository.updateBasalInfusionInfo(basalInfusionInfo.copy(updatedAt = DateTime.now(), mode = 1, isStop = false))) return false
+        val patchInfo = patchInfoRepository.getPatchInfoBySync() ?: return false
+        return patchInfoRepository.updatePatchInfo(
+            patchInfo.copy(isStopped = false, stopMinutes = null, stopMode = null, isForceStopped = null, mode = 1)
+        )
     }
 }

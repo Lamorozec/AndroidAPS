@@ -8,6 +8,8 @@ import app.aaps.core.interfaces.rx.AapsSchedulers
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.pump.carelevo.ble.CarelevoBleSession
 import app.aaps.pump.carelevo.ble.commands.BuzzModeCommand
+import app.aaps.pump.carelevo.ble.commands.PumpResumeCommand
+import app.aaps.pump.carelevo.ble.commands.PumpStopCommand
 import app.aaps.pump.carelevo.common.CarelevoPatch
 import app.aaps.pump.carelevo.common.keys.CarelevoBooleanPreferenceKey
 import app.aaps.pump.carelevo.coordinator.CarelevoConnectionCoordinator
@@ -101,7 +103,9 @@ class CarelevoActivationExecutor @Inject constructor(
         // Settle window after dropping the legacy GATT before the new transport re-dials the same
         // device (mirrors CarelevoPumpPlugin). Phase-2 new-stack path only.
         private const val NEW_BLE_SETTLE_MS = 1000L
-        private const val RESULT_SUCCESS = 0 // pump result byte 0 = SUCCESS (legacy Result taxonomy)
+        private const val RESULT_SUCCESS = 0 // pump result byte 0 = SUCCESS / BY_REQ (legacy Result/StopPumpResult taxonomy)
+        private const val STOP_RESUME_SUB_ID = 0 // legacy StopPumpRequest/ResumePumpRequest use subId/causeId = 0
+        private const val RESUME_MODE = 1 // legacy ResumePumpRequest(mode = 1)
     }
 
     private val _safetyProgress = MutableSharedFlow<SafetyProgress>(extraBufferCapacity = 16)
@@ -221,6 +225,9 @@ class CarelevoActivationExecutor @Inject constructor(
     }
 
     private fun runPumpStop(command: CmdPumpStop): PumpEnactResult {
+        if (preferences.get(CarelevoBooleanPreferenceKey.CARELEVO_USE_NEW_BLE_STACK)) {
+            return runPumpStopViaNewStack(command.durationMin)
+        }
         val result = pumpEnactResultProvider.get()
         return try {
             val response = awaitOnIo(pumpStopUseCase.execute(CarelevoPumpStopRequestModel(durationMin = command.durationMin)), PUMP_STOP_TIMEOUT_SEC)
@@ -233,6 +240,9 @@ class CarelevoActivationExecutor @Inject constructor(
     }
 
     private fun runPumpResume(): PumpEnactResult {
+        if (preferences.get(CarelevoBooleanPreferenceKey.CARELEVO_USE_NEW_BLE_STACK)) {
+            return runPumpResumeViaNewStack()
+        }
         val result = pumpEnactResultProvider.get()
         return try {
             val response = awaitOnIo(pumpResumeUseCase.execute(), PUMP_RESUME_TIMEOUT_SEC)
@@ -240,6 +250,60 @@ class CarelevoActivationExecutor @Inject constructor(
             result.success(success).enacted(success)
         } catch (e: Exception) {
             aapsLogger.error(LTag.PUMPCOMM, "CmdPumpResume exception", e)
+            result.success(false).enacted(false).comment(e.message ?: "error")
+        }
+    }
+
+    /**
+     * Phase-2 pump-stop over the new [app.aaps.pump.carelevo.ble.BleClient] stack (flag-gated). Same
+     * connection-ownership handling as the buzzer/status paths: drop the legacy link + settle, then write
+     * [PumpStopCommand] on the new transport's own session. On success (`resultCode == 0`) persist the
+     * suspended state through the SAME seam as legacy (`pumpStopUseCase.persistStopped`). SAFETY: this
+     * suspends delivery; the pump can be resumed via [runPumpResumeViaNewStack] (or the legacy path with
+     * the flag off). See `_docs/carelevo-new-ble-stack.md`.
+     */
+    private fun runPumpStopViaNewStack(durationMin: Int): PumpEnactResult {
+        val result = pumpEnactResultProvider.get()
+        val address = carelevoPatch.getPatchInfoAddress()
+            ?: return result.success(false).enacted(false).comment("no patch address")
+        return try {
+            connectionCoordinator.disconnect("new-ble-session")
+            val response = runBlocking {
+                delay(NEW_BLE_SETTLE_MS)
+                bleSession.runSingle(address, PumpStopCommand(durationMinutes = durationMin, subId = STOP_RESUME_SUB_ID))
+            }
+            if (response.resultCode != RESULT_SUCCESS) {
+                aapsLogger.error(LTag.PUMPCOMM, "newBle.pumpStop rejected result=${response.resultCode}")
+                return result.success(false).enacted(false).comment("stop result ${response.resultCode}")
+            }
+            val persisted = pumpStopUseCase.persistStopped(durationMin)
+            aapsLogger.info(LTag.PUMPCOMM, "newBle.pumpStop OK durationMin=$durationMin persisted=$persisted")
+            result.success(persisted).enacted(persisted)
+        } catch (e: Exception) {
+            aapsLogger.error(LTag.PUMPCOMM, "newBle.pumpStop FAILED", e)
+            result.success(false).enacted(false).comment(e.message ?: "error")
+        }
+    }
+
+    private fun runPumpResumeViaNewStack(): PumpEnactResult {
+        val result = pumpEnactResultProvider.get()
+        val address = carelevoPatch.getPatchInfoAddress()
+            ?: return result.success(false).enacted(false).comment("no patch address")
+        return try {
+            connectionCoordinator.disconnect("new-ble-session")
+            val response = runBlocking {
+                delay(NEW_BLE_SETTLE_MS)
+                bleSession.runSingle(address, PumpResumeCommand(mode = RESUME_MODE, subId = STOP_RESUME_SUB_ID))
+            }
+            if (response.resultCode != RESULT_SUCCESS) { // 0 = BY_REQ
+                aapsLogger.error(LTag.PUMPCOMM, "newBle.pumpResume rejected result=${response.resultCode}")
+                return result.success(false).enacted(false).comment("resume result ${response.resultCode}")
+            }
+            val persisted = pumpResumeUseCase.persistResumed()
+            aapsLogger.info(LTag.PUMPCOMM, "newBle.pumpResume OK persisted=$persisted")
+            result.success(persisted).enacted(persisted)
+        } catch (e: Exception) {
+            aapsLogger.error(LTag.PUMPCOMM, "newBle.pumpResume FAILED", e)
             result.success(false).enacted(false).comment(e.message ?: "error")
         }
     }
