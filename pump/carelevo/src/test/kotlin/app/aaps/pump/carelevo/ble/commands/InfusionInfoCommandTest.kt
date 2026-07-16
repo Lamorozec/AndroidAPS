@@ -5,9 +5,8 @@ import org.junit.jupiter.api.Test
 import kotlin.test.assertFailsWith
 
 /**
- * Verifies [InfusionInfoCommand] decodes the 0x91 frame to the SAME values the legacy
- * `CarelevoProtocolInfusionStatusInquiryParserImpl` produces (running time, reservoir with the ×100
- * hundreds byte, basal/bolus totals, raw pumpState/mode).
+ * Verifies [InfusionInfoCommand] decodes the 0x91 frame: running time, reservoir with the ×100
+ * hundreds byte, basal/bolus totals, raw pumpState/mode.
  */
 internal class InfusionInfoCommandTest {
 

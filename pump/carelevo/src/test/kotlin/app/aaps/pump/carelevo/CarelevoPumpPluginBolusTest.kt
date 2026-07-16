@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
 import org.mockito.kotlin.any
 import org.mockito.kotlin.isA
+import org.mockito.kotlin.verifyBlocking
 import org.mockito.kotlin.whenever
 import java.util.Optional
 
@@ -124,6 +125,56 @@ class CarelevoPumpPluginBolusTest : CarelevoPumpPluginTestBase() {
         assertThat(result.success).isTrue()
         assertThat(result.enacted).isTrue()
         assertThat(result.isTempCancel).isTrue()
+    }
+
+    @Test
+    fun `setExtendedBolus should require a positive duration`() {
+        // durationInMinutes == 0 would otherwise encode speed = Infinity onto the wire.
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { plugin.setExtendedBolus(insulin = 1.0, durationInMinutes = 0) }
+        }
+    }
+
+    @Test
+    fun `deliverTreatment should continue and record the bolus when the local persist fails after the pump ACK`() {
+        // Pump ACKed (resultCode==0 stubbed in the base) — insulin IS being delivered. A failed
+        // local persist must NOT turn that into "nothing happened": the delivery loop still runs
+        // and the bolus still reaches pumpSync, or IOB would silently lose a delivered dose.
+        whenever(startImmeBolusInfusionUseCase.persistImmeBolusStarted(any(), any(), any())).thenReturn(false)
+
+        val result = runBlocking {
+            plugin.deliverTreatment(DetailedBolusInfo().apply {
+                insulin = 0.25
+                carbs = 0.0
+            })
+        }
+
+        assertThat(result.success).isTrue()
+        assertThat(result.enacted).isTrue()
+        assertThat(result.bolusDelivered).isWithin(0.001).of(0.25)
+        verifyBlocking(pumpSync) { syncBolusWithPumpId(any(), any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `setExtendedBolus should record in pumpSync even when the local persist fails`() {
+        whenever(startExtendBolusInfusionUseCase.persistExtendBolusStarted(any(), any(), any())).thenReturn(false)
+
+        val result = runBlocking { plugin.setExtendedBolus(insulin = 1.2, durationInMinutes = 30) }
+
+        assertThat(result.success).isTrue()
+        assertThat(result.enacted).isTrue()
+        verifyBlocking(pumpSync) { syncExtendedBolusWithPumpId(any(), any(), any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `cancelExtendedBolus should record the stop in pumpSync even when the local persist fails`() {
+        whenever(cancelExtendBolusInfusionUseCase.persistExtendBolusCancelled()).thenReturn(false)
+
+        val result = runBlocking { plugin.cancelExtendedBolus() }
+
+        assertThat(result.success).isTrue()
+        assertThat(result.enacted).isTrue()
+        verifyBlocking(pumpSync) { syncStopExtendedBolusWithPumpId(any(), any(), any(), any()) }
     }
 
     @Test

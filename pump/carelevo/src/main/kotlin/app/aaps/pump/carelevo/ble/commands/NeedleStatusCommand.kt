@@ -6,10 +6,10 @@ import app.aaps.pump.carelevo.ble.BleCommand
  * `CMD_NEEDLE_STATUS_REQ` (0x1A) → `CMD_NEEDLE_INSERT_RPT` (0x79). Requests the cannula-insertion status.
  *
  * **Asymmetric opcodes** (0x1A → 0x79, not the usual `+0x60`) and a **long physical wait**: the pump
- * replies only once the needle insertion has finished, and the legacy path awaited it with NO timeout.
- * The caller must therefore wrap `request(...)` in a generous `withTimeout(...)`.
+ * replies only once the needle insertion has finished, with no fixed timeout on the wire. The caller
+ * must therefore wrap `request(...)` in a generous `withTimeout(...)`.
  *
- * Request wire format (2 bytes): `[0] 0x1A, [1] 0x00` (legacy sends `BooleanToByte(true) = 0x00`).
+ * Request wire format (2 bytes): `[0] 0x1A, [1] 0x00`.
  * Response (0x79): `[0] 0x79, [1] resultCode` → [SimpleResultResponse].
  */
 class NeedleStatusCommand : BleCommand<SimpleResultResponse> {
@@ -28,7 +28,7 @@ class NeedleStatusCommand : BleCommand<SimpleResultResponse> {
 
         const val REQUEST_OPCODE: Byte = 0x1A
         const val RESPONSE_OPCODE: Byte = 0x79
-        private const val REQUEST_FLAG: Byte = 0x00 // legacy BooleanToByte(true) = 0x00
+        private const val REQUEST_FLAG: Byte = 0x00
         private const val MIN_RESPONSE_LENGTH = 2
     }
 }

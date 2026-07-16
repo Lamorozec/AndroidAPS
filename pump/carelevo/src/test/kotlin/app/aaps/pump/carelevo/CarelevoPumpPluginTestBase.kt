@@ -14,6 +14,7 @@ import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.rx.AapsSchedulers
 import app.aaps.core.interfaces.sharedPreferences.SP
 import app.aaps.core.interfaces.ui.IconsProvider
+import app.aaps.core.interfaces.ui.UiInteraction
 import app.aaps.core.interfaces.utils.DateUtil
 import app.aaps.core.interfaces.utils.fabric.FabricPrivacy
 import app.aaps.core.keys.interfaces.Preferences
@@ -114,6 +115,7 @@ abstract class CarelevoPumpPluginTestBase {
     @Mock lateinit var deleteUserSettingInfoUseCase: CarelevoDeleteUserSettingInfoUseCase
 
     @Mock lateinit var carelevoAlarmNotifier: CarelevoAlarmNotifier
+    @Mock lateinit var uiInteraction: UiInteraction
 
     protected lateinit var plugin: CarelevoPumpPlugin
     protected lateinit var testProfile: Profile
@@ -152,8 +154,8 @@ abstract class CarelevoPumpPluginTestBase {
 
         whenever(finishImmeBolusInfusionUseCase.execute()).thenReturn(Single.just(ResponseResult.Success(ResultSuccess)))
 
-        // New-stack seams: the coordinators/plugin run everything over the gateway/session now; stub the
-        // happy path so the plugin tests exercise the same success flows they did on legacy.
+        // The coordinators/plugin run everything over the gateway/session; stub the happy path so the
+        // plugin tests exercise the success flows.
         whenever(carelevoPatch.getPatchInfoAddress()).thenReturn("AA:BB:CC:DD:EE:FF")
         whenever { bleSession.runSingle(any(), isA<TempBasalCommand>(), any()) }.thenReturn(SimpleResultResponse(0))
         whenever { bleSession.runSingle(any(), isA<TempBasalCancelCommand>(), any()) }.thenReturn(SimpleResultResponse(0))
@@ -235,6 +237,7 @@ abstract class CarelevoPumpPluginTestBase {
             protectionCheck = protectionCheck,
             blePreCheck = blePreCheck,
             iconsProvider = iconsProvider,
+            uiInteraction = uiInteraction,
             pumpEnactResultProvider = pumpEnactResultProvider,
             carelevoPatch = carelevoPatch,
             carelevoAlarmNotifier = carelevoAlarmNotifier,

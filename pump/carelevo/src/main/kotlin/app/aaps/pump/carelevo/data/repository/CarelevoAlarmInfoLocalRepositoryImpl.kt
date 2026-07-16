@@ -23,8 +23,8 @@ class CarelevoAlarmInfoLocalRepositoryImpl @Inject constructor(
                 Optional.of(list)
             }
 
-    override fun getAlarmsOnce(includeUnacknowledged: Boolean): Single<Optional<List<CarelevoAlarmInfo>>> =
-        dataSource.getAlarmsOnce(includeUnacknowledged) // Single<Optional<List<Entity>>>
+    override fun getAlarmsOnce(): Single<Optional<List<CarelevoAlarmInfo>>> =
+        dataSource.getAlarmsOnce() // Single<Optional<List<Entity>>>
             .map { opt ->
                 val list = opt.orElse(emptyList())
                     .map { it.transformToDomainModel() }
@@ -37,8 +37,8 @@ class CarelevoAlarmInfoLocalRepositoryImpl @Inject constructor(
     override fun upsertAlarm(alarm: CarelevoAlarmInfo): Completable =
         dataSource.upsertAlarm(alarm.transformToEntity())
 
-    override fun markAcknowledged(alarmId: String, acknowledged: Boolean, updatedAt: String): Completable =
-        dataSource.markAcknowledged(alarmId, acknowledged, updatedAt)
+    override fun removeAlarm(alarmId: String): Completable =
+        dataSource.removeAlarm(alarmId)
 
     override fun clearAlarms(): Completable =
         dataSource.clearAlarms()

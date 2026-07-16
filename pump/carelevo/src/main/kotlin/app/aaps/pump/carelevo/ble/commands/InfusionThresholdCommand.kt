@@ -6,11 +6,10 @@ import app.aaps.pump.carelevo.ble.BleResponse
 /**
  * `CMD_INFUSION_THRESHOLD_REQ` (0x17) → `CMD_INFUSION_THRESHOLD_RES` (0x77). Sets an infusion limit —
  * one command class for both consumers, parameterized by [isMaxVolume]:
- * - `false` = max basal **speed** (U/h), range 0.05..15.0 — legacy `setThresholdInsulinMaxSpeed`, flag byte 0x00
- * - `true`  = max bolus **volume** (U),  range 0.05..25.0 — legacy `setThresholdInsulinMaxVolume`, flag byte 0x01
+ * - `false` = max basal **speed** (U/h), range 0.05..15.0 — flag byte 0x00
+ * - `true`  = max bolus **volume** (U),  range 0.05..25.0 — flag byte 0x01
  *
- * The flag byte is `BooleanToByte`: max-speed sends `transform(true)=0x00`, max-volume sends
- * `transform(false)=0x01` — so `flag = if (isMaxVolume) 0x01 else 0x00`.
+ * The flag byte is inverted: `flag = if (isMaxVolume) 0x01 else 0x00`.
  *
  * Request wire format (4 bytes): `[0] 0x17, [1] flag, [2..3] value = [intPart, centiPart]`.
  * Response (0x77): `[0] 0x77, [1] type, [2] resultCode`.

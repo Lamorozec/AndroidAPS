@@ -17,6 +17,7 @@ import app.aaps.core.ui.compose.AapsSpacing
 import app.aaps.core.ui.compose.pump.WizardButton
 import app.aaps.core.ui.compose.pump.WizardStepLayout
 import app.aaps.pump.carelevo.R
+import app.aaps.pump.carelevo.config.FillConfig
 import app.aaps.pump.carelevo.presentation.type.CarelevoPatchStep
 import app.aaps.pump.carelevo.presentation.viewmodel.CarelevoPatchConnectionFlowViewModel
 
@@ -52,7 +53,7 @@ private fun CarelevoPatchStartContent(
             style = MaterialTheme.typography.titleMedium
         )
         Text(
-            text = stringResource(R.string.carelevo_notice_fill_insulin_amount),
+            text = stringResource(R.string.carelevo_notice_fill_insulin_amount, FillConfig.FILL_MIN_UNITS, FillConfig.FILL_MAX_UNITS),
             style = MaterialTheme.typography.bodyMedium
         )
         CarelevoInsulinRefillGuideSection(

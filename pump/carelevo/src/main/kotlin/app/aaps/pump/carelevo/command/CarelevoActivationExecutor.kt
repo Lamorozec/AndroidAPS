@@ -70,13 +70,13 @@ class CarelevoActivationExecutor @Inject constructor(
 
     private companion object {
 
-        private const val RESULT_SUCCESS = 0 // pump result byte 0 = SUCCESS / BY_REQ (legacy Result/StopPumpResult taxonomy)
-        private const val STOP_RESUME_SUB_ID = 0 // legacy StopPumpRequest/ResumePumpRequest use subId/causeId = 0
-        private const val RESUME_MODE = 1 // legacy ResumePumpRequest(mode = 1)
-        private const val TIMEZONE_SUB_ID = 1 // legacy SetTimeRequest(subId = 1) for the timezone/DST update path
-        private const val TIMEZONE_AID_MODE = 0 // legacy SetTimeRequest(aidMode = 0)
+        private const val RESULT_SUCCESS = 0 // pump result byte 0 = SUCCESS / BY_REQ
+        private const val STOP_RESUME_SUB_ID = 0 // stop/resume use subId/causeId = 0
+        private const val RESUME_MODE = 1 // resume mode = 1
+        private const val TIMEZONE_SUB_ID = 1 // set-time subId = 1 for the timezone/DST update path
+        private const val TIMEZONE_AID_MODE = 0 // set-time aidMode = 0
         private const val NEEDLE_CHECK_TIMEOUT_MS = 90_000L // physical cannula insertion may take a while
-        private const val SAFETY_PROGRESS_HEADROOM_SEC = 30 // legacy: Progress timeout = firstFrame.durationSeconds + 30
+        private const val SAFETY_PROGRESS_HEADROOM_SEC = 30 // Progress timeout = firstFrame.durationSeconds + 30
     }
 
     private val _safetyProgress = MutableSharedFlow<SafetyProgress>(extraBufferCapacity = 16)
@@ -198,8 +198,8 @@ class CarelevoActivationExecutor @Inject constructor(
     }
 
     /**
-     * Max-bolus setting. Preserves the legacy semantics: never push a threshold mid-bolus (persist
-     * locally + defer via `needMaxBolusDoseSyncPatch`); otherwise write [InfusionThresholdCommand]
+     * Max-bolus setting. Never push a threshold mid-bolus (persist locally + defer via
+     * `needMaxBolusDoseSyncPatch`); otherwise write [InfusionThresholdCommand]
      * (max-volume), then persist with `synced` = the patch confirmed. On any failure the value is still
      * persisted with the sync flag set so the deferred-sync re-pushes on reconnect.
      */
@@ -229,8 +229,8 @@ class CarelevoActivationExecutor @Inject constructor(
     }
 
     /**
-     * Low-insulin-notice setting. The 0x75 response fabricates a result of 0, so arrival = success
-     * (mirrors legacy). Persists via the use case with `synced` = arrived; on failure the value is
+     * Low-insulin-notice setting. The 0x75 response fabricates a result of 0, so arrival = success.
+     * Persists via the use case with `synced` = arrived; on failure the value is
      * persisted deferred for the next reconnect.
      */
     private fun runUpdateLowInsulinNotice(hours: Int): PumpEnactResult {
@@ -347,8 +347,8 @@ class CarelevoActivationExecutor @Inject constructor(
 
     /**
      * Safety Check over `requestStream`. Streams each 0x72 frame; progress frames
-     * (REP_REQUEST/REP_REQUEST1) drive the wizard countdown via [_safetyProgress] (one Progress emit,
-     * matching legacy), the terminal SUCCESS frame persists `checkSafety` + emits Success, any other
+     * (REP_REQUEST/REP_REQUEST1) drive the wizard countdown via [_safetyProgress] (one Progress emit),
+     * the terminal SUCCESS frame persists `checkSafety` + emits Success, any other
      * terminal is an Error. Activation-only op.
      */
     private fun runSafetyCheck(): PumpEnactResult {
@@ -392,7 +392,7 @@ class CarelevoActivationExecutor @Inject constructor(
 
     /**
      * Alarm clear: map the cause to the wire alarm-type byte, send [AlarmClearCommand] (0x47 → 0xA7),
-     * and on `resultCode == 0` reuse the use case's `markAcknowledged` persist.
+     * and on `resultCode == 0` reuse the use case's remove-alarm persist.
      */
     private fun runAlarmClear(command: CmdAlarmClear): PumpEnactResult {
         val result = pumpEnactResultProvider.get()
@@ -418,7 +418,7 @@ class CarelevoActivationExecutor @Inject constructor(
     /**
      * Alarm-triggered patch discard: send [PatchDiscardCommand] (0x36) then reuse the use case's DB
      * cleanup (ack + reset sync flags + delete infusion/patch). Unlike the plain [runDiscard], this does
-     * NOT unbond (no `discardTeardown`) — kept faithful to the legacy path.
+     * NOT unbond (no `discardTeardown`).
      */
     private fun runAlarmClearPatchDiscard(command: CmdAlarmClearPatchDiscard): PumpEnactResult {
         val result = pumpEnactResultProvider.get()

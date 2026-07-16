@@ -10,9 +10,9 @@ interface CarelevoAlarmInfoLocalDataSource {
 
     fun observeAlarms(): Observable<Optional<List<CarelevoAlarmInfoEntity>>>
 
-    fun getAlarmsOnce(includeUnacknowledged: Boolean = true): Single<Optional<List<CarelevoAlarmInfoEntity>>>
+    fun getAlarmsOnce(): Single<Optional<List<CarelevoAlarmInfoEntity>>>
     fun setAlarms(list: List<CarelevoAlarmInfoEntity>): Completable
     fun upsertAlarm(entity: CarelevoAlarmInfoEntity): Completable
-    fun markAcknowledged(alarmId: String, acknowledged: Boolean, updatedAt: String): Completable
+    fun removeAlarm(alarmId: String): Completable
     fun clearAlarms(): Completable
 }

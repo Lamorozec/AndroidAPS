@@ -34,8 +34,8 @@ class CarelevoBleModule {
     /**
      * Shared-fleet [app.aaps.core.interfaces.pump.ble.BleTransport] for CareLevo.
      * The coroutine stack ([app.aaps.pump.carelevo.ble.BleClient] via
-     * [app.aaps.pump.carelevo.ble.gatt.BleTransportGattConnection]) runs on this; a future
-     * emulator impl can be swapped in here. See `_docs/carelevo-new-ble-stack.md`.
+     * [app.aaps.pump.carelevo.ble.gatt.BleTransportGattConnection]) runs on this; an emulator impl
+     * can be swapped in here.
      */
     @Provides
     @Singleton

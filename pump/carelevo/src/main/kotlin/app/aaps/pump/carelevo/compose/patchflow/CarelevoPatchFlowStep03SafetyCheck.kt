@@ -135,6 +135,11 @@ internal fun CarelevoPatchFlowStep03SafetyCheck(
     val showSafetyCheckButton = safetyCheckState == SafetyCheckUiState.Ready
     val showRetrySection = safetyCheckState == SafetyCheckUiState.Success
     val showProgressDetails = safetyCheckState != SafetyCheckUiState.Ready
+    // While the ~100-210 s check is streaming, block the discard escape hatch: tapping it would
+    // enqueue a CmdDiscard behind the still-running CmdSafetyCheck — a confusing interleaving
+    // that never reflects what the user sees on screen. (The global Loading overlay is deliberately
+    // NOT used here — it would hide this step's live progress display.)
+    val discardEnabled = safetyCheckState != SafetyCheckUiState.Progress
 
     CarelevoPatchFlowStep03SafetyCheckContent(
         titleRes = titleRes,
@@ -146,6 +151,7 @@ internal fun CarelevoPatchFlowStep03SafetyCheck(
         showRetrySection = showRetrySection,
         showSafetyCheckButton = showSafetyCheckButton,
         nextEnabled = nextEnabled,
+        discardEnabled = discardEnabled,
         onRetryClick = {
             errorMessage = null
             viewModel.retryAdditionalPriming()
@@ -170,6 +176,7 @@ private fun CarelevoPatchFlowStep03SafetyCheckContent(
     showRetrySection: Boolean,
     showSafetyCheckButton: Boolean,
     nextEnabled: Boolean,
+    discardEnabled: Boolean = true,
     onRetryClick: () -> Unit,
     onDiscardClick: () -> Unit,
     onSafetyCheckClick: () -> Unit,
@@ -190,7 +197,8 @@ private fun CarelevoPatchFlowStep03SafetyCheckContent(
         },
         secondaryButton = WizardButton(
             text = stringResource(R.string.carelevo_btn_patch_expiration),
-            onClick = onDiscardClick
+            onClick = onDiscardClick,
+            enabled = discardEnabled
         )
     ) {
         errorMessage?.let { ErrorBanner(message = stringResource(it)) }
@@ -267,8 +275,9 @@ private fun remainTimeText(remainSeconds: Long?): String {
     return stringResource(R.string.common_unit_remain_min_sec, minutes, seconds)
 }
 
+@Composable
 private fun progressText(progress: Int?): String =
-    if (progress == null) "" else "$progress/100"
+    if (progress == null) "" else stringResource(R.string.carelevo_progress_of_100, progress)
 
 @Preview(showBackground = true, name = "Safety Check Ready")
 @Composable

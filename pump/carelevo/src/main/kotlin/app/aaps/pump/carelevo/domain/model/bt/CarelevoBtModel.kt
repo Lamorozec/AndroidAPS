@@ -99,15 +99,6 @@ data class InfusionInfoReportResultModel(
 
 data class PatchInformationInquiryModel(
     val result: Result,
-    // val productCL : String,
-    // val productTY : String,
-    // val productMO : String,
-    // val processCO : String,
-    // val manufactureYE : String,
-    // val manufactureMO : String,
-    // val manufactureDA : String,
-    // val manufactureLO : String,
-    // val manufactureNO : String,
     val serialNum: String
 ) : PatchResultModel
 
@@ -140,7 +131,6 @@ data class SetApplicationStatusResultModel(
 ) : PatchResultModel
 
 data class RetrieveAddressResultModel(
-    // val value : Int,
     val address: String,
     val checkSum: String
 ) : PatchResultModel

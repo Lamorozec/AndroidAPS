@@ -11,15 +11,11 @@ import app.aaps.pump.carelevo.ble.BleResponse
  * Request wire format (7 bytes): `[0] 0x25, [1..2] immediateDose = [intPart, centiPart],
  * [3..4] extendedSpeed = [intPart, centiPart], [5] hour, [6] min`.
  *
- * Legacy quirk — **no dose range validation.** The legacy transformers for both doses are
- * `CarelevoDoubleToByteTransformerImpl(0.0, 0.0)`, whose `min == max == 0.0` escape hatch skips the
- * range check entirely (it only encodes). So [immediateDose]/[extendedSpeed] are NOT range-checked
- * here either, to stay byte-for-byte with the legacy path; only [hour] (0..24) and [min] (0..59) are
- * validated, matching `CarelevoIntegerToByteTransformerImpl(0, 24)` / `(0, 59)`.
+ * **No dose range validation:** [immediateDose]/[extendedSpeed] are NOT range-checked; only [hour]
+ * (0..24) and [min] (0..59) are validated.
  *
  * Response (0x85): `[0] 0x85, [1] resultCode, [2..3] expectedTime = [2]*60 + [3]` (seconds) →
- * [ExtendBolusResponse]. The legacy parser also stamps `timestamp = System.currentTimeMillis()`, which
- * is fabricated (not on the wire); it is a domain concern and is not reproduced by this wire decoder.
+ * [ExtendBolusResponse].
  *
  * (The async 0x9C extended-bolus delay report is a separate unsolicited message — not this response.)
  */

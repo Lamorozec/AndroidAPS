@@ -22,22 +22,6 @@ class CarelevoInfusionInfoDataSourceImpl @Inject constructor(
         return infusionInfoDao.getInfusionInfoBySync()
     }
 
-    override fun getBasalInfusionInfo(): CarelevoBasalInfusionInfoEntity? {
-        return infusionInfoDao.getBasalInfusionInfo()
-    }
-
-    override fun getTemBasalInfusionInfo(): CarelevoTempBasalInfusionInfoEntity? {
-        return infusionInfoDao.getTempBasalInfusionInfo()
-    }
-
-    override fun getImmeBolusInfusionInfo(): CarelevoImmeBolusInfusionInfoEntity? {
-        return infusionInfoDao.getImmeBolusInfusionInfo()
-    }
-
-    override fun getExtendBolusInfusionInfo(): CarelevoExtendBolusInfusionInfoEntity? {
-        return infusionInfoDao.getExtendBolusInfusionInfo()
-    }
-
     override fun updateBasalInfusionInfo(info: CarelevoBasalInfusionInfoEntity): Boolean {
         return infusionInfoDao.updateBasalInfusionInfo(info)
     }
@@ -52,10 +36,6 @@ class CarelevoInfusionInfoDataSourceImpl @Inject constructor(
 
     override fun updateExtendBolusInfusionInfo(info: CarelevoExtendBolusInfusionInfoEntity): Boolean {
         return infusionInfoDao.updateExtendBolusInfusionInfo(info)
-    }
-
-    override fun updateInfusionInfo(info: CarelevoInfusionInfoEntity): Boolean {
-        return updateInfusionInfo(info)
     }
 
     override fun deleteBasalInfusionInfo(): Boolean {

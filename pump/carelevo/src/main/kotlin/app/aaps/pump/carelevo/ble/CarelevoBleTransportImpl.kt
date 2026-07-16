@@ -136,8 +136,8 @@ class CarelevoBleTransportImpl @Inject constructor(
         val existing = this.listener
         if (existing != null && listener != null && existing !== listener) {
             // This @Singleton holds a single listener slot; a new adapter registering before the
-            // previous one closed would silently orphan it (its in-flight ops would hang). Not
-            // reachable today (Phase 1 wires no reconnect flow) — guard for Phase 2.
+            // previous one closed would silently orphan it (its in-flight ops would hang). This is a
+            // defensive guard against that overlap.
             aapsLogger.warn(LTag.PUMPBTCOMM, "setListener overwriting an active listener; previous connection not closed?")
         }
         this.listener = listener
@@ -300,6 +300,9 @@ class CarelevoBleTransportImpl @Inject constructor(
                 listener?.onConnectionStateChanged(false)
                 return
             }
+            // setValue-then-write is NOT atomic on the shared characteristic object; it is safe only
+            // because BleTransportGattConnection.gattMutex serializes all suspend GATT ops. Do not
+            // decouple this transport from that serialization without adding one here.
             chara.setValue(data)
             gatt.writeCharacteristic(chara)
         }

@@ -2,6 +2,7 @@ package app.aaps.pump.carelevo.compose
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -12,6 +13,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -22,13 +24,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import app.aaps.core.ui.compose.LocalSnackbarHostState
+import app.aaps.core.ui.R as CoreUiR
 import app.aaps.core.ui.compose.StatusLevel
 import app.aaps.core.ui.compose.icons.IcLoopPaused
 import app.aaps.core.ui.compose.pump.ActionCategory
@@ -46,11 +49,11 @@ import app.aaps.pump.carelevo.presentation.type.CarelevoScreenType
 import app.aaps.pump.carelevo.presentation.viewmodel.CarelevoOverviewViewModel
 
 @Composable
-fun CarelevoOverviewScreen(
+internal fun CarelevoOverviewScreen(
     viewModel: CarelevoOverviewViewModel,
+    snackbarHostState: SnackbarHostState,
     onStartWorkflow: (CarelevoScreenType) -> Unit
 ) {
-    val snackbarHostState = LocalSnackbarHostState.current
     val baseState by viewModel.overviewUiState.collectAsStateWithLifecycle()
     val actionState by viewModel.uiState.collectAsStateWithLifecycle()
 
@@ -172,13 +175,16 @@ fun CarelevoOverviewScreen(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.32f)),
+                    .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.32f))
+                    // Consume all taps so an in-flight discard/suspend/resume can't be re-fired
+                    // by a second tap on the action underneath.
+                    .pointerInput(Unit) { detectTapGestures { } },
                 contentAlignment = Alignment.Center
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
                     Text(
-                        text = stringResource(app.aaps.core.ui.R.string.loading),
+                        text = stringResource(CoreUiR.string.loading),
                         color = MaterialTheme.colorScheme.onSurface,
                         style = MaterialTheme.typography.bodyLarge
                     )
@@ -251,7 +257,7 @@ private fun CarelevoOverviewScreenConnectedPreview() {
                         onClick = {}
                     ),
                     PumpAction(
-                        label = stringResource(app.aaps.core.ui.R.string.pump_suspend),
+                        label = stringResource(CoreUiR.string.pump_suspend),
                         icon = IcLoopPaused,
                         category = ActionCategory.MANAGEMENT,
                         enabled = true,

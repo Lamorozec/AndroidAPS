@@ -19,7 +19,7 @@ import java.util.UUID
 import kotlin.test.assertFailsWith
 
 /**
- * Executable specification for the extended [BleClient] surface added in Phase 2 step 1:
+ * Executable specification for the extended [BleClient] surface:
  * [BleClient.requestMultiple] (multi-response, e.g. Patch Info `0x33`→`0x93`+`0x94`) and
  * [BleClient.requestStream] (streaming/progress, e.g. Safety Check `0x12`→`0x72`…).
  *

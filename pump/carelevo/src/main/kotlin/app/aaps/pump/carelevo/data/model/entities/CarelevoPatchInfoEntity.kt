@@ -1,11 +1,10 @@
 package app.aaps.pump.carelevo.data.model.entities
 
-import org.joda.time.DateTime
 
 data class CarelevoPatchInfoEntity(
     val address: String,
-    val createdAt: String = DateTime.now().toString(),
-    val updatedAt: String = DateTime.now().toString(),
+    val createdAt: String,
+    val updatedAt: String,
     val manufactureNumber: String? = null,
     val firmwareVersion: String? = null,
     val bootDateTime: String? = null,

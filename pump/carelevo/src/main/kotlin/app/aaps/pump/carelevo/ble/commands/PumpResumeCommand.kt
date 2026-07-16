@@ -5,19 +5,17 @@ import app.aaps.pump.carelevo.ble.BleResponse
 
 /**
  * `CMD_PUMP_RESTART_REQ` (0x27) → `CMD_PUMP_RESTART_RES` (0x87). Resumes (restarts) a paused pump —
- * **SAFETY-CRITICAL** delivery-affecting operation, so the wire layout is reproduced byte-for-byte.
+ * **SAFETY-CRITICAL** delivery-affecting operation.
  *
  * Request wire format (3 bytes): `[0] 0x27, [1] mode, [2] subId`.
- * - `mode`  — legacy `CarelevoIntegerToByteTransformerImpl(1, 4)`: range-checked 1..4, emitted as one raw
- *   byte (`mode.toByte()`).
- * - `subId` — legacy `CarelevoSubIdToByteTransformerImpl`: only 0, 1 or 4 are valid and each maps to itself
- *   (4→0x04, 1→0x01, else→0x00); any other value is rejected.
+ * - `mode`  — range-checked 1..4, emitted as one raw byte (`mode.toByte()`).
+ * - `subId` — only 0, 1 or 4 are valid and each maps to itself (4→0x04, 1→0x01, else→0x00); any other
+ *   value is rejected.
  *
- * Response (0x87): `[0] 0x87, [1] resultCode, [2] mode, [3] subId`. **`subId` is OPTIONAL** — the legacy
- * parser reads `data[3]` only when the response is longer than 3 bytes, otherwise defaults `subId = 0`
- * (variable-length reply reproduced here). The parser also fabricates a `timestamp`/`cmd` that are not on
- * the wire; those are dropped by this pure wire decoder. (The separate 0x88 `BasalRestartRpt` is async and
- * is **not** this response.)
+ * Response (0x87): `[0] 0x87, [1] resultCode, [2] mode, [3] subId`. **`subId` is OPTIONAL** — `data[3]`
+ * is read only when the response is longer than 3 bytes, otherwise `subId` defaults to 0 (variable-length
+ * reply). Any timestamp/cmd bookkeeping is not on the wire and is dropped by this pure wire decoder. (The
+ * separate 0x88 `BasalRestartRpt` is async and is **not** this response.)
  */
 class PumpResumeCommand(
     private val mode: Int,
@@ -39,7 +37,7 @@ class PumpResumeCommand(
         return PumpResumeResponse(
             resultCode = responsePayload.u(1),
             mode = responsePayload.u(2),
-            // subId is optional: only present when the reply carries a 4th byte, else 0 (legacy default).
+            // subId is optional: only present when the reply carries a 4th byte, else 0.
             subId = if (responsePayload.size > SUB_ID_INDEX) responsePayload.u(SUB_ID_INDEX) else 0
         )
     }
@@ -54,7 +52,7 @@ class PumpResumeCommand(
         private const val SUB_ID_INDEX = 3
         private const val MIN_RESPONSE_LENGTH = 3
 
-        /** Mirrors `CarelevoSubIdToByteTransformerImpl`: 4→0x04, 1→0x01, else→0x00 (identity for valid ids). */
+        /** Encodes subId: 4→0x04, 1→0x01, else→0x00 (identity for valid ids). */
         private fun encodeSubId(subId: Int): Byte = when (subId) {
             4    -> 0x04
             1    -> 0x01

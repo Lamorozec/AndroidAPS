@@ -27,11 +27,11 @@ import kotlin.math.roundToInt
  * Example: `ImmediateBolusCommand(actionId = 42, volume = 2.5).encode()` →
  * `[0x24, 0x2A, 0x02, 0x32]` (42 = 0x2A, 50 centi-units = 0x32).
  *
- * Response wire format (≥ 8 bytes, matches legacy `CarelevoProtocolImmeBolusInfusionParserImpl`):
+ * Response wire format (≥ 8 bytes):
  * ```
  * [0]    0x84              opcode
  * [1]    actionId          echoed from the request — used for correlation
- * [2]    resultCode        pump-specific result code; 0 = SUCCESS in existing Result enum
+ * [2]    resultCode        pump-specific result code; 0 = SUCCESS
  * [3]    expectedMinutes   minutes portion of expected completion time
  * [4]    expectedSeconds   seconds portion (combined seconds = [3]*60 + [4])
  * [5..7] remainsWholeU     remaining reservoir units = [5]*100.0 + [6] + [7]/100.0
@@ -56,7 +56,8 @@ class ImmediateBolusCommand(
     override val correlationByte: Byte = actionId.toByte()
 
     override fun encode(): ByteArray {
-        val rounded = BigDecimal(volume).setScale(2, RoundingMode.HALF_UP).toDouble()
+        // valueOf (canonical decimal), not BigDecimal(double) — see encodeUnitCenti in CommandCodec.
+        val rounded = BigDecimal.valueOf(volume).setScale(2, RoundingMode.HALF_UP).toDouble()
         val wholeUnits = rounded.toInt()
         val centiUnits = ((rounded - wholeUnits) * 100).roundToInt()
         return byteArrayOf(
@@ -111,7 +112,7 @@ class ImmediateBolusCommand(
  * Decoded response from [ImmediateBolusCommand].
  *
  * [resultCode] is the raw pump-protocol result byte; consumers map it to a domain
- * enum (`0 = SUCCESS` in the legacy `Result` taxonomy).
+ * enum (`0 = SUCCESS`).
  */
 data class ImmediateBolusResponse(
     val actionId: Int,

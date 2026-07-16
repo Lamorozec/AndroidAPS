@@ -102,7 +102,7 @@ class CarelevoPatchSafetyCheckViewModel @Inject constructor(
         }
 
         // Route through the CommandQueue: it reconnects if the link dropped, runs the check on the
-        // queue thread, and returns a real success/fail result (no more silent no-op on a dead link).
+        // queue thread, and returns a real success/fail result.
         triggerEvent(CarelevoConnectSafetyCheckEvent.SafetyCheckProgress)
         viewModelScope.launch {
             val progressJob = launch {
@@ -168,7 +168,7 @@ class CarelevoPatchSafetyCheckViewModel @Inject constructor(
                 viewModelScope.launch {
                     val result = commandQueue.customCommand(CmdDiscard())
                     if (result.success) {
-                        // unBond + releasePatch now run inside CmdDiscard on the queue thread
+                        // unBond + releasePatch run inside CmdDiscard on the queue thread
                         setUiState(UiState.Idle)
                         triggerEvent(CarelevoConnectSafetyCheckEvent.DiscardComplete)
                     } else {

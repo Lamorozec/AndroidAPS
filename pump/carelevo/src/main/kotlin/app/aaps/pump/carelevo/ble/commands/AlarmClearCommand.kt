@@ -8,13 +8,12 @@ import app.aaps.pump.carelevo.ble.BleResponse
  * Criticality: medium.
  *
  * Request wire format (3 bytes): `[0] 0x47, [1] alarmType, [2] cause`.
- * - `alarmType` — raw byte, **no range check** (legacy inlines `byteArrayOf(alarmType.toByte())`),
- *   so values > 0x7F pass straight through as the two's-complement byte.
- * - `cause` — range-checked `0..100` (legacy `IntegerToByte(0, 100)`).
+ * - `alarmType` — raw byte, **no range check**, so values > 0x7F pass straight through as the
+ *   two's-complement byte.
+ * - `cause` — range-checked `0..100`.
  *
- * Response (0xA7): `[0] 0xA7, [1] subId, [2] cause, [3] resultCode` — mirrors the shared
- * `CarelevoProtocolMsgSolutionParserImpl.parse` (named args: subId=`data[1]`, cause=`data[2]`,
- * result=`data[3]`). `resultCode` 0 = SUCCESS in the legacy `Result` taxonomy; consumers map it.
+ * Response (0xA7): `[0] 0xA7, [1] subId, [2] cause, [3] resultCode`. `resultCode` 0 = SUCCESS;
+ * consumers map it.
  */
 class AlarmClearCommand(
     private val alarmType: Int,

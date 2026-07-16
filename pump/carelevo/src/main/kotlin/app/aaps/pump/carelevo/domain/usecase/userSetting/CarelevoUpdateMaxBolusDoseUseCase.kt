@@ -18,8 +18,8 @@ class CarelevoUpdateMaxBolusDoseUseCase @Inject constructor(
 
     /**
      * Persist the max-bolus setting. [synced] = the patch confirmed the push; when false,
-     * `needMaxBolusDoseSyncPatch` stays true so the deferred-sync re-pushes on the next reconnect (mirrors
-     * the legacy fail/disconnected cases). Returns false with no setting record or on a failed write.
+     * `needMaxBolusDoseSyncPatch` stays true so the deferred-sync re-pushes on the next reconnect.
+     * Returns false with no setting record or on a failed write.
      */
     fun persistMaxBolusDose(value: Double, synced: Boolean): Boolean {
         val userSettingInfo = userSettingInfoRepository.getUserSettingInfoBySync() ?: return false

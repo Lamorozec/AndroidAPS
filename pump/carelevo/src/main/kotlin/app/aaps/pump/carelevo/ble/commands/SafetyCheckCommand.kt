@@ -10,7 +10,7 @@ import app.aaps.pump.carelevo.ble.BleStreamCommand
  *
  * Request wire format (1 byte): `[0] 0x12`.
  *
- * Response wire format (0x72, ≥ 4 bytes, matches `CarelevoProtocolSafetyCheckParserImpl`):
+ * Response wire format (0x72, ≥ 4 bytes):
  * ```
  * [0]      0x72            opcode
  * [1]      resultCode      (SafetyCheckResult: 0 SUCCESS, 4/18 progress, 1/2/3/11/12 errors)
@@ -30,8 +30,8 @@ class SafetyCheckCommand : BleStreamCommand<SafetyCheckResponse> {
 
     override fun decode(responsePayload: ByteArray): SafetyCheckResponse {
         requireResponseFrame(responsePayload, RESPONSE_OPCODE, MIN_RESPONSE_LENGTH)
-        // Faithful to the legacy parser: reads the duration bytes only when size > 4 (a short/progress
-        // frame falls back to 210 s). Real frames are size 4 or ≥ 6.
+        // Duration bytes are read only when size > 4; a short/progress frame falls back to 210 s.
+        // Real frames are size 4 or ≥ 6.
         val durationSeconds =
             if (responsePayload.size > 4) responsePayload.u(4) * SECONDS_PER_MINUTE + responsePayload.u(5)
             else DEFAULT_DURATION_SECONDS

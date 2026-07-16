@@ -58,6 +58,6 @@ class CarelevoPatchRptInfusionInfoProcessUseCase @Inject constructor(
                     ResponseResult.Error(it)
                 }
             )
-        }.observeOn(Schedulers.io())
+        }.subscribeOn(Schedulers.io())
     }
 }

@@ -24,6 +24,7 @@ import dagger.multibindings.IntoMap
 @Suppress("unused")
 abstract class CarelevoModule {
 
+    // Pump plugin registration — @IntKey range 1000–1200, see PluginsListModule for overview
     @Binds
     @PumpDriver
     @IntoMap

@@ -28,6 +28,6 @@ class CarelevoDeleteUserSettingInfoUseCase @Inject constructor(
                     ResponseResult.Error(it)
                 }
             )
-        }.observeOn(Schedulers.io())
+        }.subscribeOn(Schedulers.io())
     }
 }

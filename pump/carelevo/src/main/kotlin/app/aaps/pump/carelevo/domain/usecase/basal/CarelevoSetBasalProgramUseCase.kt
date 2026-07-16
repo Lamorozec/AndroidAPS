@@ -18,7 +18,7 @@ class CarelevoSetBasalProgramUseCase @Inject constructor(
 ) {
 
     /**
-     * Compute the basal program from [profile] the exact way the legacy execute path did (`getBasalValues` →
+     * Compute the basal program from [profile] (`getBasalValues` →
      * `splitSegment` → 24 hourly segments → three `chunked(8)` speed lists, seqNo 0/1/2).
      * [BasalProgramPlan.programs] are the wire payloads (v2 sends speed only, not hour/min),
      * [BasalProgramPlan.segments] is the full 24-segment list the infusion-info persist needs.

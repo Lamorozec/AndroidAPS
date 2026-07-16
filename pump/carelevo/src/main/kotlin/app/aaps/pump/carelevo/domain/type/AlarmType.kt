@@ -1,5 +1,13 @@
 package app.aaps.pump.carelevo.domain.type
 
+/**
+ * Pump alarm severity tier as reported on the wire (`code` 0/1/2).
+ *
+ * Tier semantics, derived from the paired cause codes in [AlarmCause]: ALERT is the ESCALATION of
+ * WARNING for the same condition (WARNING_LOW_INSULIN(0x01) → ALERT_OUT_OF_INSULIN(0x01),
+ * WARNING_PATCH_EXPIRED_PHASE_1(0x02) → ALERT_PATCH_EXPIRED_PHASE_2(0x02), BLE_NOT_CONNECTED 0x06
+ * exists in both). NOTICE is informational.
+ */
 enum class AlarmType(val code: Int) {
     WARNING(0),
     ALERT(1),
@@ -16,8 +24,15 @@ enum class AlarmType(val code: Int) {
             return type.code
         }
 
+        /**
+         * True for the tiers that must take the STRONGEST surfacing path (global alarm sound +
+         * full-screen, never a silent banner): both pump-fault tiers, WARNING and ALERT.
+         *
+         * DEVICE-VERIFY: confirm against vendor protocol docs that no ALERT cause is intentionally
+         * low-priority.
+         */
         fun AlarmType.isCritical(): Boolean =
-            this == WARNING
+            this == WARNING || this == ALERT
     }
 }
 

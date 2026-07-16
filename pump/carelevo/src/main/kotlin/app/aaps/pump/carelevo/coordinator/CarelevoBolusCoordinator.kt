@@ -71,9 +71,9 @@ class CarelevoBolusCoordinator @Inject constructor(
         private const val PROGRESS_POLL_MS = 100L
         private const val RESULT_SUCCESS = 0
 
-        // The out-of-band new-stack cancel opens a fresh GATT per attempt (unlike legacy, which reuses the open
-        // link), so cap retries low — a single bounded connect+write settles a reachable patch; more attempts
-        // only lengthen the two-GATT-collision window against an unreachable one (which can't be stopped anyway).
+        // The out-of-band cancel opens a fresh GATT per attempt, so cap retries low — a single bounded
+        // connect+write settles a reachable patch; more attempts only lengthen the two-GATT-collision
+        // window against an unreachable one (which can't be stopped anyway).
         private const val NEW_STACK_CANCEL_MAX_RETRY = 1
 
         // Backstop only: the guard normally releases the moment the cancel session finishes (via
@@ -84,10 +84,14 @@ class CarelevoBolusCoordinator @Inject constructor(
 
     @Volatile private var isImmeBolusStop = false
 
-    // True for the WHOLE out-of-band new-stack cancel span (across retries) — the delivery worker's guard blocks
-    // while this is set so it can't re-dial the legacy GATT while the cancel's GATT is open (two-GATT status-133).
+    // True for the WHOLE out-of-band cancel span (across retries) — the delivery worker's guard blocks
+    // while this is set so it can't re-dial the primary link while the cancel's GATT is open (two-GATT status-133).
     @Volatile private var immeBolusCancelInFlight = false
-    private var bolusExpectMs: Long = 0
+
+    // Written on the queue worker (handleBolusSuccess), read from the out-of-band cancel thread
+    // (calculateMaxRetry in cancelImmediateBolusInternal) — needs the same visibility guarantee
+    // as its two sibling flags above.
+    @Volatile private var bolusExpectMs: Long = 0
     private val _lastBolusTime = MutableStateFlow<Long?>(null)
     val lastBolusTime: StateFlow<Long?> = _lastBolusTime
 
@@ -141,6 +145,10 @@ class CarelevoBolusCoordinator @Inject constructor(
         durationInMinutes: Int,
         serialNumber: String
     ): PumpEnactResult {
+        // Same fail-fast guard style as deliverTreatment: durationInMinutes==0 would otherwise
+        // produce speed=Infinity, silently mangled into wire bytes.
+        require(insulin > 0.0) { "extended bolus insulin must be > 0, got $insulin" }
+        require(durationInMinutes > 0) { "extended bolus duration must be > 0 min, got $durationInMinutes" }
         val result = pumpEnactResultProvider.get()
         if (!carelevoPatch.isBluetoothEnabled()) return result
         return setExtendedBolusInternal(insulin, durationInMinutes, serialNumber)
@@ -157,8 +165,8 @@ class CarelevoBolusCoordinator @Inject constructor(
 
     /**
      * Set-extended-bolus core (**delivery-critical**). Discrete `ExtendBolusCommand` (0x25→0x85) on the
-     * session — **`immediateDose` is always 0.0** (pure extended, matching legacy; a non-zero value
-     * injects an unintended upfront dose). On `resultCode==0` reuse the use case's `mode=5` persist → then
+     * session — **`immediateDose` is always 0.0** (pure extended; a non-zero value injects an unintended
+     * upfront dose). On `resultCode==0` reuse the use case's `mode=5` persist → then
      * `pumpSync.syncExtendedBolusWithPumpId`.
      */
     private fun setExtendedBolusInternal(
@@ -175,9 +183,12 @@ class CarelevoBolusCoordinator @Inject constructor(
         return try {
             val response = runBlocking { bleSession.runSingle(address, ExtendBolusCommand(immediateDose = 0.0, extendedSpeed = speed, hour = hour, min = min)) }
             val success = response.resultCode == RESULT_SUCCESS
+            // Once the pump ACKs, the extended bolus IS running — pumpSync must record it even if the
+            // local persist fails (otherwise IOB silently diverges from what the patch delivers).
             val persisted = success && startExtendBolusInfusionUseCase.persistExtendBolusStarted(volume = insulin, speed = speed, minutes = durationInMinutes)
             aapsLogger.info(LTag.PUMPCOMM, "newBle.setExtendedBolus insulin=$insulin result=${response.resultCode} persisted=$persisted")
-            if (success && persisted) {
+            if (success && !persisted) aapsLogger.error(LTag.PUMPCOMM, "newBle.setExtendedBolus persist failed — pump enacted, recording in pumpSync anyway")
+            if (success) {
                 runBlocking {
                     pumpSync.syncExtendedBolusWithPumpId(
                         timestamp = dateUtil.now(),
@@ -208,8 +219,7 @@ class CarelevoBolusCoordinator @Inject constructor(
     /**
      * Cancel-extended-bolus core. Discrete `ExtendBolusCancelCommand` (0x29→0x89, response carries
      * `infusedAmount`) on the session → delete + recompute-mode persist →
-     * `pumpSync.syncStopExtendedBolusWithPumpId`. `infusedAmount` is logged only (legacy did not reconcile
-     * it into the DB).
+     * `pumpSync.syncStopExtendedBolusWithPumpId`. `infusedAmount` is logged only (not reconciled into the DB).
      */
     private fun cancelExtendedBolusInternal(
         serialNumber: String,
@@ -221,9 +231,12 @@ class CarelevoBolusCoordinator @Inject constructor(
         return try {
             val response = runBlocking { bleSession.runSingle(address, ExtendBolusCancelCommand()) }
             val success = response.resultCode == RESULT_SUCCESS
+            // Same pump-is-authoritative rule as the start path: on ACK the extended bolus IS stopped
+            // on the patch, so the stop must reach pumpSync even if the local persist fails.
             val persisted = success && cancelExtendBolusInfusionUseCase.persistExtendBolusCancelled()
             aapsLogger.info(LTag.PUMPCOMM, "newBle.cancelExtendedBolus result=${response.resultCode} infused=${response.infusedAmount} persisted=$persisted")
-            if (success && persisted) {
+            if (success && !persisted) aapsLogger.error(LTag.PUMPCOMM, "newBle.cancelExtendedBolus persist failed — pump stopped, recording stop in pumpSync anyway")
+            if (success) {
                 onLastDataUpdated()
                 runBlocking {
                     pumpSync.syncStopExtendedBolusWithPumpId(
@@ -281,16 +294,16 @@ class CarelevoBolusCoordinator @Inject constructor(
                 result.bolusDelivered = 0.0
                 return result.comment(rh.gs(R.string.alarm_feat_msg_check_patch_connect))
             }
+            // The pump ACKed (resultCode==0) — insulin IS being delivered from this point on. The
+            // local persist is bookkeeping only: if it fails we MUST still run the delivery loop and
+            // record the bolus in pumpSync, otherwise a delivered dose would vanish from IOB and the
+            // loop could stack insulin on top of it. Persist failure is logged as a secondary fault.
             if (!startImmeBolusInfusionUseCase.persistImmeBolusStarted(actionId, detailedBolusInfo.insulin, response.expectedCompletionSeconds)) {
-                aapsLogger.error(LTag.PUMPCOMM, "newBle.deliverTreatment persist failed")
-                result.success = false
-                result.enacted = false
-                result.bolusDelivered = 0.0
-                return result.comment("Internal error")
+                aapsLogger.error(LTag.PUMPCOMM, "newBle.deliverTreatment persist failed — continuing, pump is delivering (bookkeeping will recover on next status read)")
             }
             aapsLogger.info(LTag.PUMPCOMM, "ble.deliverTreatment start insulin=${detailedBolusInfo.insulin} expectSec=${response.expectedCompletionSeconds}")
-            // Start session has closed; run the synthetic progress loop with NO link (Option A) by reusing the
-            // exact legacy loop via handleBolusSuccess with a synthesized success response.
+            // Start session has closed; run the synthetic progress loop with NO link (Option A) via
+            // handleBolusSuccess with a synthesized success response.
             handleBolusSuccess(
                 ResponseResult.Success(StartImmeBolusInfusionResponseModel(expectSec = response.expectedCompletionSeconds)),
                 detailedBolusInfo,
@@ -310,7 +323,7 @@ class CarelevoBolusCoordinator @Inject constructor(
     /**
      * Option A concurrency guard: if the user stopped the bolus, keep the queue worker blocked here until the
      * OUT-OF-BAND cancel session has confirmed ([isImmeBolusStop]) — otherwise the freed worker could re-dial
-     * the legacy GATT while the cancel's new-transport session is still open (two GATTs → status-133). Bounded
+     * the primary link while the cancel's session is still open (two GATTs → status-133). Bounded
      * by [CANCEL_WAIT_TIMEOUT_MS] so an unreachable-pump cancel can't hang the worker; a reachable patch
      * settles in ~1-2 s.
      */
@@ -337,6 +350,11 @@ class CarelevoBolusCoordinator @Inject constructor(
      * `infusedAmount` ([PumpSync]) + delete/recompute persist + set [isImmeBolusStop] (which breaks the
      * delivery loop). Retries ONLY a timed-out attempt up to a small [NEW_STACK_CANCEL_MAX_RETRY] — each
      * attempt is a full fresh connect, so more retries only lengthen the two-GATT window.
+     *
+     * HARDWARE ASSUMPTION (load-bearing for the retry): re-sending `BolusCancelCommand` after a
+     * timed-out attempt whose original write DID reach the pump must be a harmless no-op on an
+     * already-cancelled/finished bolus (non-SUCCESS result, no side effect). This is not verifiable
+     * in software — revalidate if the firmware protocol ever changes.
      * [immeBolusCancelInFlight] spans the whole call so the delivery worker's guard blocks until the
      * cancel's GATT is closed.
      */
@@ -361,7 +379,8 @@ class CarelevoBolusCoordinator @Inject constructor(
                             rh.gs(app.aaps.core.interfaces.R.string.bolus_delivered_successfully, infusedAmount.toFloat()),
                             PumpInsulin(infusedAmount)
                         )
-                        cancelImmeBolusInfusionUseCase.persistImmeBolusCancelled()
+                        val persisted = cancelImmeBolusInfusionUseCase.persistImmeBolusCancelled()
+                        if (!persisted) aapsLogger.error(LTag.PUMPCOMM, "newBle.cancelImmediateBolus persist failed — stale local bolus record until next status read")
                         runBlocking {
                             pumpSync.syncBolusWithPumpId(
                                 dateUtil.now(),
@@ -379,11 +398,11 @@ class CarelevoBolusCoordinator @Inject constructor(
                     aapsLogger.error(LTag.PUMPCOMM, "newBle.cancelImmediateBolus failed result=${response.resultCode}")
                     return
                 } catch (_: TimeoutCancellationException) {
-                    // Only a timeout is worth another fresh-connect attempt (mirrors legacy's timeout-only retry).
+                    // Only a timeout is worth another fresh-connect attempt.
                     aapsLogger.error(LTag.PUMPCOMM, "newBle.cancelImmediateBolus timeout attempt=$attempt")
                     attempt++
                 } catch (e: Exception) {
-                    // Any other failure (connect refused, BLE error): give up, like legacy — do not retry.
+                    // Any other failure (connect refused, BLE error): give up — do not retry.
                     aapsLogger.error(LTag.PUMPCOMM, "newBle.cancelImmediateBolus error=$e")
                     return
                 }
@@ -488,8 +507,8 @@ class CarelevoBolusCoordinator @Inject constructor(
             result.bolusDelivered = detailedInfo.insulin
         } else {
             // User stopped mid-bolus (loop broke before the finish step). The actual partial amount is
-            // recorded separately by stopBolusDeliveringInternal via syncBolusWithPumpId(infusedAmount),
-            // so don't report the full requested dose as delivered. Mirror VirtualPumpPlugin's stop contract.
+            // recorded separately by the cancel path via syncBolusWithPumpId(infusedAmount), so don't
+            // report the full requested dose as delivered. Matches VirtualPumpPlugin's stop contract.
             result.success = false
             result.enacted = false
             result.bolusDelivered = 0.0

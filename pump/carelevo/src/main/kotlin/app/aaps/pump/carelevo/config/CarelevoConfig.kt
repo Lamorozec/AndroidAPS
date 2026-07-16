@@ -10,6 +10,20 @@ class BleEnvConfig {
     }
 }
 
+/**
+ * Insulin fill limits of the patch reservoir. Single source of truth for the wizard's amount
+ * picker AND the user-facing range texts — must stay consistent with
+ * `PumpType.CAREMEDI_CARELEVO.maxReservoirReading` (300) in `core:data`.
+ */
+class FillConfig {
+    companion object {
+
+        const val FILL_MIN_UNITS = 50
+        const val FILL_MAX_UNITS = 300
+        const val FILL_STEP_UNITS = 10
+    }
+}
+
 class PrefEnvConfig {
     companion object {
 

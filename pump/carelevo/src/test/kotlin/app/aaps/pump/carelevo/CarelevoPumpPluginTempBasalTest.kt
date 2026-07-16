@@ -6,9 +6,11 @@ import app.aaps.pump.carelevo.ble.commands.TempBasalCancelCommand
 import app.aaps.pump.carelevo.ble.commands.TempBasalCommand
 import com.google.common.truth.Truth.assertThat
 import kotlinx.coroutines.runBlocking
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
 import org.mockito.kotlin.any
 import org.mockito.kotlin.isA
+import org.mockito.kotlin.verifyBlocking
 import org.mockito.kotlin.whenever
 
 class CarelevoPumpPluginTempBasalTest : CarelevoPumpPluginTestBase() {
@@ -52,6 +54,37 @@ class CarelevoPumpPluginTempBasalTest : CarelevoPumpPluginTestBase() {
     }
 
     @Test
+    fun `setTempBasalAbsolute should require a positive duration`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { plugin.setTempBasalAbsolute(1.2, 0, false, PumpSync.TemporaryBasalType.NORMAL) }
+        }
+    }
+
+    @Test
+    fun `setTempBasalAbsolute should record in pumpSync even when the local persist fails`() {
+        // Pump ACKed — the TBR IS running on the patch; a failed local persist must not keep it
+        // out of pumpSync or basal IOB modeling diverges for the whole TBR duration.
+        whenever(startTempBasalInfusionUseCase.persistTempBasalStarted(any())).thenReturn(false)
+
+        val result = runBlocking { plugin.setTempBasalAbsolute(1.2, 30, false, PumpSync.TemporaryBasalType.NORMAL) }
+
+        assertThat(result.success).isTrue()
+        assertThat(result.enacted).isTrue()
+        verifyBlocking(pumpSync) { syncTemporaryBasalWithPumpId(any(), any(), any(), any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `cancelTempBasal should record the stop in pumpSync even when the local persist fails`() {
+        whenever(cancelTempBasalInfusionUseCase.persistTempBasalCancelled()).thenReturn(false)
+
+        val result = runBlocking { plugin.cancelTempBasal(false) }
+
+        assertThat(result.success).isTrue()
+        assertThat(result.enacted).isTrue()
+        verifyBlocking(pumpSync) { syncStopTemporaryBasalWithPumpId(any(), any(), any(), any(), any()) }
+    }
+
+    @Test
     fun `setTempBasalPercent should succeed on success response`() {
         val result = runBlocking { plugin.setTempBasalPercent(150, 30, false, PumpSync.TemporaryBasalType.NORMAL) }
 
@@ -62,8 +95,8 @@ class CarelevoPumpPluginTempBasalTest : CarelevoPumpPluginTestBase() {
 
     @Test
     fun `setTempBasalPercent should fail when the session throws`() {
-        // Legacy propagated the raw exception out of the plugin; the session path catches and maps it
-        // to a failed PumpEnactResult (deliberate improvement — a BLE error must not crash the queue).
+        // A BLE error must be caught and mapped to a failed PumpEnactResult, not propagated out of the
+        // plugin — an exception escaping here would crash the command queue.
         whenever { bleSession.runSingle(any(), isA<TempBasalCommand>(), any()) }
             .thenAnswer { throw IllegalStateException("timeout") }
 

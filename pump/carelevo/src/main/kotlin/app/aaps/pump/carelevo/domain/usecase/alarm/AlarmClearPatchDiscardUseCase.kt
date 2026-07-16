@@ -5,7 +5,6 @@ import app.aaps.pump.carelevo.domain.repository.CarelevoInfusionInfoRepository
 import app.aaps.pump.carelevo.domain.repository.CarelevoPatchInfoRepository
 import app.aaps.pump.carelevo.domain.repository.CarelevoUserSettingInfoRepository
 import org.joda.time.DateTime
-import java.time.LocalDateTime
 
 class AlarmClearPatchDiscardUseCase(
     private val alarmRepository: CarelevoAlarmInfoRepository,
@@ -20,7 +19,7 @@ class AlarmClearPatchDiscardUseCase(
      * user-setting record or if any write fails.
      */
     fun persistAlarmDiscarded(alarmId: String): Boolean = runCatching {
-        alarmRepository.markAcknowledged(alarmId = alarmId, acknowledged = true, updatedAt = LocalDateTime.now().toString()).blockingAwait()
+        alarmRepository.removeAlarm(alarmId).blockingAwait()
 
         val userSettingInfo = userSettingInfoRepository.getUserSettingInfoBySync()
             ?: throw NullPointerException("user setting info must be not null")

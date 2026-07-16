@@ -141,7 +141,7 @@ class CarelevoPatchNeedleInsertionViewModel @Inject constructor(
 
         setUiState(UiState.Loading)
         // Routed through the CommandQueue: it connects (and reconnects if the link dropped) before
-        // running the check on the queue worker thread, so a mid-activation drop no longer no-ops.
+        // running the check on the queue worker thread, so a mid-activation drop is handled.
         viewModelScope.launch {
             val result = commandQueue.customCommand(CmdNeedleCheck())
             setUiState(UiState.Idle)
@@ -292,7 +292,7 @@ class CarelevoPatchNeedleInsertionViewModel @Inject constructor(
                 viewModelScope.launch {
                     val result = commandQueue.customCommand(CmdDiscard())
                     if (result.success) {
-                        // unBond + releasePatch now run inside CmdDiscard on the queue thread
+                        // unBond + releasePatch run inside CmdDiscard on the queue thread
                         setUiState(UiState.Idle)
                         triggerEvent(CarelevoConnectNeedleEvent.DiscardComplete)
                     } else {

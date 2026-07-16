@@ -219,7 +219,7 @@ class CarelevoPatchConnectionFlowViewModel @Inject constructor(
                 viewModelScope.launch {
                     val result = commandQueue.customCommand(CmdDiscard())
                     if (result.success) {
-                        // unBond + releasePatch now run inside CmdDiscard on the queue thread
+                        // unBond + releasePatch run inside CmdDiscard on the queue thread
                         setUiState(UiState.Idle)
                         triggerEvent(CarelevoConnectEvent.DiscardComplete)
                     } else {
@@ -374,19 +374,25 @@ class CarelevoPatchConnectionFlowViewModel @Inject constructor(
     /** Apply the chosen insulin (if different from the active one) and continue to the fill step. */
     fun advanceFromInsulin() {
         val selected = _selectedInsulin.value
-        goToNextStep(CarelevoPatchStep.SELECT_INSULIN)
-        if (selected == null) return
+        if (selected == null) {
+            goToNextStep(CarelevoPatchStep.SELECT_INSULIN)
+            return
+        }
+        // Commit the insulin/profile switch BEFORE advancing, so later steps never race a
+        // still-in-flight profile change.
         viewModelScope.launch {
             val currentLabel = profileFunction.getProfile()?.iCfg?.insulinLabel
             if (selected.insulinLabel != currentLabel) {
                 profileFunction.createProfileSwitchWithNewInsulin(selected, Sources.Carelevo)
             }
+            goToNextStep(CarelevoPatchStep.SELECT_INSULIN)
         }
     }
 
     // endregion
 
     override fun onCleared() {
+        super.onCleared()
         compositeDisposable.clear()
     }
 }

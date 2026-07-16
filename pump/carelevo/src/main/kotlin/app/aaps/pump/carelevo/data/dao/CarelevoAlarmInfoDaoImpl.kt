@@ -18,34 +18,24 @@ class CarelevoAlarmInfoDaoImpl @Inject constructor(
     private val _alarms: BehaviorSubject<Optional<List<CarelevoAlarmInfoEntity>>> = BehaviorSubject.create()
 
     override fun getAlarms(): Observable<Optional<List<CarelevoAlarmInfoEntity>>> {
+        // Cold-load through the SAME unfiltered loader every other method uses. The original
+        // vendor code filtered this one path to `it.acknowledged` — which is never true, because
+        // acknowledging DELETES the entity (see removeAlarm) — so every persisted active alarm
+        // (occlusion, out of insulin, …) silently vanished from the stream on process restart.
         if (_alarms.value == null) {
-            runCatching {
-                val json = prefManager.getString(PrefEnvConfig.CARELEVO_ALARM_INFO_LIST, "")
-                if (json.isBlank()) {
-                    emptyList<CarelevoAlarmInfoEntity>()
-                } else {
-                    CarelevoGsonHelper.sharedGson().fromJson(json, Array<CarelevoAlarmInfoEntity>::class.java).toList().filter { it.acknowledged }
-                }
-            }.fold(
-                onSuccess = { list ->
-                    _alarms.onNext(Optional.of(list))
-                },
-                onFailure = { e ->
+            runCatching { ensureLoaded() }
+                .onFailure { e ->
                     e.printStackTrace()
                     _alarms.onNext(Optional.ofNullable(null))
                 }
-            )
         }
         return _alarms
     }
 
-    override fun getAlarmsOnce(includeUnacknowledged: Boolean): Single<Optional<List<CarelevoAlarmInfoEntity>>> {
-        return Single.fromCallable {
-            val list = ensureLoaded().let { current ->
-                current.filter { it.acknowledged == includeUnacknowledged }
-            }
-            Optional.of(list)
-        }
+    override fun getAlarmsOnce(): Single<Optional<List<CarelevoAlarmInfoEntity>>> {
+        // Everything in the store is an active (unacknowledged) alarm by construction — an
+        // acknowledged alarm is removed, not flagged.
+        return Single.fromCallable { Optional.of(ensureLoaded()) }
     }
 
     override fun setAlarms(list: List<CarelevoAlarmInfoEntity>): Completable {
@@ -87,7 +77,7 @@ class CarelevoAlarmInfoDaoImpl @Inject constructor(
         }
     }
 
-    override fun markAcknowledged(alarmId: String, acknowledged: Boolean, updatedAt: String): Completable {
+    override fun removeAlarm(alarmId: String): Completable {
         return Completable.fromAction {
             val current = ensureLoaded()
             val next = current.filterNot { it.alarmId == alarmId }

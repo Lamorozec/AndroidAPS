@@ -17,6 +17,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.aaps.core.interfaces.logging.AAPSLogger
+import app.aaps.core.ui.R as CoreUiR
+import app.aaps.core.ui.compose.LocalSnackbarHostState
 import app.aaps.core.interfaces.protection.ProtectionCheck
 import app.aaps.core.interfaces.protection.ProtectionResult
 import app.aaps.core.interfaces.pump.BlePreCheck
@@ -46,11 +48,14 @@ class CarelevoComposeContent(
         onSettings: (() -> Unit)?
     ) {
         val overviewViewModel: CarelevoOverviewViewModel = hiltViewModel()
+        // Single place this module reads the app-provided CompositionLocal — children get it as an
+        // explicit parameter (preferred pattern; do not add new .current consumers below).
+        val snackbarHostState = LocalSnackbarHostState.current
         val overviewNavIcon: @Composable () -> Unit = {
             IconButton(onClick = onNavigateBack) {
                 Icon(
                     Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = stringResource(app.aaps.core.ui.R.string.back)
+                    contentDescription = stringResource(CoreUiR.string.back)
                 )
             }
         }
@@ -59,7 +64,7 @@ class CarelevoComposeContent(
                 IconButton(onClick = action) {
                     Icon(
                         Icons.Filled.Settings,
-                        contentDescription = stringResource(app.aaps.core.ui.R.string.settings)
+                        contentDescription = stringResource(CoreUiR.string.settings)
                     )
                 }
             }
@@ -116,6 +121,7 @@ class CarelevoComposeContent(
                 null -> {
                     CarelevoOverviewScreen(
                         viewModel = overviewViewModel,
+                        snackbarHostState = snackbarHostState,
                         onStartWorkflow = startWorkflow
                     )
                 }
@@ -128,6 +134,7 @@ class CarelevoComposeContent(
                     CarelevoPatchFlowScreen(
                         screenType = activeWorkflowScreen,
                         setToolbarConfig = setToolbarConfig,
+                        snackbarHostState = snackbarHostState,
                         onExitFlow = {
                             manualWorkflowScreen = null
                             latchedWorkflowScreen = null
@@ -139,6 +146,7 @@ class CarelevoComposeContent(
                     CarelevoPatchFlowScreen(
                         screenType = activeWorkflowScreen,
                         setToolbarConfig = setToolbarConfig,
+                        snackbarHostState = snackbarHostState,
                         onExitFlow = {
                             manualWorkflowScreen = null
                             latchedWorkflowScreen = null
@@ -150,7 +158,8 @@ class CarelevoComposeContent(
             CarelevoAlarmHost(
                 aapsLogger = aapsLogger,
                 carelevoAlarmNotifier = carelevoAlarmNotifier,
-                iconsProvider = iconsProvider
+                iconsProvider = iconsProvider,
+                snackbarHostState = snackbarHostState
             )
         }
     }

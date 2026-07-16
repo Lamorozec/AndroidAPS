@@ -4,12 +4,11 @@ import app.aaps.pump.carelevo.ble.BleCommand
 
 /**
  * `CMD_PATCH_DISCARD_REQ` (0x36) → `CMD_PATCH_DISCARD_RES` (0x96). Discards (deactivates) the patch.
- * Medium-criticality write with no arguments — legacy `manipulateDiscardPatch` sends only the opcode byte.
+ * Medium-criticality write with no arguments — sends only the opcode byte.
  *
  * Request wire format (1 byte): `[0] 0x36`.
- * Response (0x96): `[0] 0x96, [1] resultCode` → [SimpleResultResponse] (0 = SUCCESS in the legacy `Result`
- * taxonomy; the legacy `CarelevoProtocolPatchDiscardParserImpl` reads `data[1]` as `result` and fabricates a
- * `timestamp`/`cmd` that are model bookkeeping, not on the wire).
+ * Response (0x96): `[0] 0x96, [1] resultCode` → [SimpleResultResponse] (0 = SUCCESS). Any timestamp/cmd
+ * bookkeeping is not on the wire; this decoder keeps only the result byte.
  */
 class PatchDiscardCommand : BleCommand<SimpleResultResponse> {
 

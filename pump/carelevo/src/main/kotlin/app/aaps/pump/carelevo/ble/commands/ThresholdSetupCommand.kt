@@ -4,15 +4,18 @@ import app.aaps.pump.carelevo.ble.BleCommand
 
 /**
  * `CMD_THRESHOLD_SETUP_REQ` (0x1B) → `CMD_THRESHOLD_SETUP_RES` (0x7B). Activation bundle that sets all
- * patch thresholds at once (legacy `setThreshold`).
+ * patch thresholds at once.
  *
  * Request wire format (7 bytes): `[0] 0x1B, [1] insulinRemainsThreshold, [2] expiryThreshold,
  * [3..4] maxBasalSpeed = [int,centi], [5..6] maxBolusDose = [int,centi], [7] buzzFlag`.
  *
- * **Quirks reproduced faithfully:**
- * - `insulinRemainsThreshold` is validated 10..300 by the legacy `IntegerToByte(10,300)` but written as a
- *   single byte, so values > 255 wrap (e.g. 300 → 0x2C = 44). Preserved here.
- * - `buzzFlag` is `BooleanToByte(!buzzUse)` → `buzzUse=true → 0x01`, `buzzUse=false → 0x00` (same double
+ * **Wire-format notes:**
+ * - `insulinRemainsThreshold` is a single wire byte, so `INS_REMAIN_RANGE` is 10..255; a value > 255
+ *   would wrap on encode (300 → 0x2C = 44), silently misprogramming the low-insulin alarm threshold,
+ *   so it is rejected instead. Every real caller feeds the low-insulin reminder preference (entries
+ *   20..50 U), so nothing legitimately exceeds one byte; an out-of-range caller fails loudly rather
+ *   than alarming 6× too late.
+ * - `buzzFlag` is the inverted buzz flag → `buzzUse=true → 0x01`, `buzzUse=false → 0x00` (same double
  *   inversion as [BuzzModeCommand]).
  *
  * Response (0x7B): `[0] 0x7B, [1] resultCode` → [SimpleResultResponse].
@@ -50,12 +53,13 @@ class ThresholdSetupCommand(
 
         const val REQUEST_OPCODE: Byte = 0x1B
         const val RESPONSE_OPCODE: Byte = 0x7B
-        private val INS_REMAIN_RANGE = 10..300
+        // One wire byte; 10..255 valid, larger values would wrap — see class KDoc.
+        private val INS_REMAIN_RANGE = 10..255
         private val EXPIRY_RANGE = 24..167
         private val MAX_BASAL_SPEED_RANGE = 0.05..15.0
         private val MAX_BOLUS_DOSE_RANGE = 0.05..25.0
-        private const val BUZZ_ON: Byte = 0x01 // buzzUse=true  → BooleanToByte(!true=false) = 0x01
-        private const val BUZZ_OFF: Byte = 0x00 // buzzUse=false → BooleanToByte(!false=true) = 0x00
+        private const val BUZZ_ON: Byte = 0x01 // buzzUse=true  → 0x01 (inverted)
+        private const val BUZZ_OFF: Byte = 0x00 // buzzUse=false → 0x00 (inverted)
         private const val MIN_RESPONSE_LENGTH = 2
     }
 }

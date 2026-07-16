@@ -7,14 +7,14 @@ import app.aaps.pump.carelevo.ble.BleResponse
  * `CMD_INFUSION_INFO_REQ` (0x31) → `CMD_INFUSION_INFO_RPT` (0x91). The periodic status read: reservoir,
  * running time, infused basal/bolus totals, pump state + mode. Single-response [BleCommand].
  *
- * Request wire format (2 bytes): `[0] 0x31, [1] inquiryType` (0 = by-request; legacy sends 0).
+ * Request wire format (2 bytes): `[0] 0x31, [1] inquiryType` (0 = by-request).
  *
- * Response wire format (20 bytes, matches `CarelevoProtocolInfusionStatusInquiryParserImpl`):
+ * Response wire format (20 bytes):
  * ```
  * [0]       0x91            opcode
  * [1]       subId           inquiry source code (not persisted)
  * [2..3]    runningMinutes  = [2]*60 + [3]
- * [4..6]    insulinRemaining = [4]*100 + [5] + [6]/100.0   (U; the ×100 hundreds byte is a legacy quirk)
+ * [4..6]    insulinRemaining = [4]*100 + [5] + [6]/100.0   (U; the ×100 hundreds byte is a protocol quirk)
  * [7..8]    basal total     = [7] + [8]/100.0              (U)
  * [9..10]   bolus total     = [9] + [10]/100.0             (U)
  * [11]      pumpState (raw)
@@ -23,7 +23,7 @@ import app.aaps.pump.carelevo.ble.BleResponse
  * [15..16]  currentInfusedProgramVolume = [15] + [16]/100.0 (not persisted)
  * [17..19]  realInfusedTime = ([17]*60 + [18])*60 + [19]   (seconds; not persisted)
  * ```
- * Decodes RAW values (unsigned). The pumpState/mode normalization to the persisted codes (the legacy
+ * Decodes RAW values (unsigned). The pumpState/mode normalization to the persisted codes (the
  * int→enum→int roundtrip) happens at the state-apply layer (`CarelevoPatch.applyInfusionInfoReport`),
  * keeping this command a pure wire decoder.
  */
@@ -78,9 +78,8 @@ class InfusionInfoCommand(
 
 /**
  * Decoded response from [InfusionInfoCommand] — RAW wire values. [pumpStateRaw]/[modeRaw] are the
- * unnormalized bytes; `CarelevoPatch.applyInfusionInfoReport` applies the legacy enum roundtrip before
- * persisting. [currentInfusedProgramVolume]/[realInfusedTime]/[subId] are decoded but not persisted
- * (legacy drops them too).
+ * unnormalized bytes; `CarelevoPatch.applyInfusionInfoReport` applies the enum roundtrip before
+ * persisting. [currentInfusedProgramVolume]/[realInfusedTime]/[subId] are decoded but not persisted.
  */
 data class InfusionInfoResponse(
     val subId: Int,

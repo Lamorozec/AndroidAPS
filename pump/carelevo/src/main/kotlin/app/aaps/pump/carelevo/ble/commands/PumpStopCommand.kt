@@ -9,21 +9,18 @@ import app.aaps.pump.carelevo.ble.BleCommand
  * The later `CMD_PUMP_STOP_RPT` (0x8A) the pump pushes when the stop period ends is an async/unsolicited
  * report — **not** this command's response; it is handled via [app.aaps.pump.carelevo.ble.BleClient.unsolicitedEvents].
  *
- * Request wire format (4 bytes), mirroring legacy `manipulatePumpStop(min, subId)` which splits the
- * duration into hours+minutes before the `IntegerToByte` transformers:
+ * Request wire format (4 bytes), splitting the duration into hours+minutes:
  * ```
  * [0] 0x26                         opcode
- * [1] durationMinutes / 60         hours   — IntegerToByte(0, 5),  range 0..5
- * [2] durationMinutes % 60         minutes — IntegerToByte(0, 60), range 0..60
- * [3] subId                        source  — IntegerToByte(0, 1),  range 0..1
+ * [1] durationMinutes / 60         hours   — range 0..5
+ * [2] durationMinutes % 60         minutes — range 0..60
+ * [3] subId                        source  — range 0..1
  * ```
- * Each field is one raw byte (`value.toByte()`), range-checked exactly like the legacy transformers.
- * Because `durationMinutes % 60` is always 0..59 for a non-negative duration, the effective span is
- * `0..359` minutes (5 h 59 min).
+ * Each field is one raw byte (`value.toByte()`), range-checked as above. Because `durationMinutes % 60`
+ * is always 0..59 for a non-negative duration, the effective span is `0..359` minutes (5 h 59 min).
  *
- * Response (0x86): `[0] 0x86, [1] resultCode` → [SimpleResultResponse]. The legacy parser also fabricates
- * a `timestamp` (`System.currentTimeMillis()`) and echoes `cmd` (`data[0]`); neither is on the wire, so
- * this pure wire decoder drops them (the caller owns timestamping).
+ * Response (0x86): `[0] 0x86, [1] resultCode` → [SimpleResultResponse]. Any timestamp/cmd bookkeeping is
+ * not on the wire, so this pure wire decoder drops it (the caller owns timestamping).
  */
 class PumpStopCommand(
     private val durationMinutes: Int,

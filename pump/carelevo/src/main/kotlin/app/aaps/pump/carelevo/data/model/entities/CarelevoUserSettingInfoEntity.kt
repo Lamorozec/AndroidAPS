@@ -1,10 +1,9 @@
 package app.aaps.pump.carelevo.data.model.entities
 
-import org.joda.time.DateTime
 
 data class CarelevoUserSettingInfoEntity(
-    val createdAt: String = DateTime.now().toString(),
-    val updatedAt: String = DateTime.now().toString(),
+    val createdAt: String,
+    val updatedAt: String,
     val lowInsulinNoticeAmount: Int? = null,
     val maxBasalSpeed: Double? = null,
     val maxBolusDose: Double? = null,

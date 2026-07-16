@@ -5,16 +5,16 @@ import app.aaps.pump.carelevo.ble.BleMultiCommand
 import org.joda.time.DateTime
 
 /**
- * Shared `CMD_SET_TIME_REQ` (0x11) request encoding — mirrors legacy `setTime`:
+ * Shared `CMD_SET_TIME_REQ` (0x11) request encoding:
  * `[0] 0x11, [1] subId, [2..7] dateTime = [yy,MM,dd,HH,mm,ss], [8..9] volume = [vol/100, vol%100], [10] aidMode]`.
  *
- * The legacy `DateTimeToByte` transformer ignores its argument and stamps `DateTime()` now; here the
  * [dateTime] is an explicit parameter (caller passes `DateTime.now()`) so `encode()` is deterministic and
- * unit-testable. Year = last two digits (`year.toString().substring(2)`); volume validated 0..300.
+ * unit-testable. Year = last two digits (`year % 100`); volume validated 0..300.
  */
 internal fun encodeSetTime(subId: Int, volume: Int, aidMode: Int, dateTime: DateTime): ByteArray {
     require(volume in VOLUME_RANGE) { "volume out of range $VOLUME_RANGE" }
-    val yy = dateTime.year.toString().substring(2).toInt()
+    // last two digits via arithmetic — can't throw on unusual years.
+    val yy = dateTime.year % 100
     return byteArrayOf(
         SET_TIME_REQUEST_OPCODE,
         subId.toByte(),

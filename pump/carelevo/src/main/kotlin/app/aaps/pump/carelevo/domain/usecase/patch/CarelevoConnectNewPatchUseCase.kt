@@ -18,10 +18,9 @@ class CarelevoConnectNewPatchUseCase @Inject constructor(
     }
 
     /**
-     * Persist the freshly paired patch — used by the new-stack pairing (`CarelevoBleSession.runPairing`).
-     * bootDateTime is fabricated from the phone clock exactly like the legacy RPT2 parser did (the value
-     * is never on the wire — the legacy `CarelevoProtocolPatchInformationInquiryDetailParserImpl` stamped
-     * `DateTime()` as `yyMMddHHmm`). Returns false if the DB write fails.
+     * Persist the freshly paired patch — used by the pairing session (`CarelevoBleSession.runPairing`).
+     * bootDateTime is fabricated from the phone clock — it is never on the wire; the persistence layer
+     * stamps it as `yyMMddHHmm`. Returns false if the DB write fails.
      */
     fun persistNewPatch(
         address: String,

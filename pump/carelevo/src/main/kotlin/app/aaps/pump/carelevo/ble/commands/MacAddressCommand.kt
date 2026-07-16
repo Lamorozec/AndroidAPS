@@ -6,9 +6,7 @@ import app.aaps.pump.carelevo.ble.BleResponse
 /**
  * `CMD_MAC_ADDR_REQ` (0x3B) → `CMD_MAC_ADDR_RES` (0x9B).
  *
- * Reads the peripheral's MAC address during initial bonding. Read-only, no pump state
- * change — an ideal candidate for first-time smoke testing of the new BLE stack on
- * real hardware.
+ * Reads the peripheral's MAC address during initial bonding. Read-only, no pump state change.
  *
  * Request wire format (2 bytes):
  * ```
@@ -22,10 +20,6 @@ import app.aaps.pump.carelevo.ble.BleResponse
  * [1..6]   macAddress      6 bytes, most-significant byte first
  * [7..]    checkSum        remainder of the payload, derived from (address || key)
  * ```
- *
- * Mirrors the encoding/decoding already done by
- * `CarelevoBtPatchRemoteDataSourceImpl.retrieveMacAddress` and
- * `CarelevoProtocolPatchAddressParserImpl` in the legacy stack.
  */
 class MacAddressCommand(
     /** Random byte chosen by the caller; the response's checksum is derived from this + the address. */
@@ -70,11 +64,7 @@ class MacAddressCommand(
  * Decoded response from [MacAddressCommand].
  *
  * Both fields are upper-case hex strings with no separators (e.g. `"94B2161D2F6D"`).
- * Note: this format **deliberately diverges** from the legacy
- * `ProtocolPatchAddressRspModel` / `RetrieveAddressResponse`, which produces a
- * non-standard `"0x940xB20x16..."` layout via `convertBytesToHex`. The new format
- * is standard and easier to compare/display. No consumers exist yet — when this
- * response is wired into repositories, the consumer is responsible for formatting.
+ * The consumer is responsible for any display formatting.
  */
 data class MacAddressResponse(
     val macAddress: String,

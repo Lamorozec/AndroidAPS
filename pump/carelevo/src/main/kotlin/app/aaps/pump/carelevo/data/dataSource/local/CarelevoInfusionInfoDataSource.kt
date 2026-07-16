@@ -13,16 +13,10 @@ interface CarelevoInfusionInfoDataSource {
     fun getInfusionInfo(): Observable<Optional<CarelevoInfusionInfoEntity>>
     fun getInfusionInfoBySync(): CarelevoInfusionInfoEntity?
 
-    fun getBasalInfusionInfo(): CarelevoBasalInfusionInfoEntity?
-    fun getTemBasalInfusionInfo(): CarelevoTempBasalInfusionInfoEntity?
-    fun getImmeBolusInfusionInfo(): CarelevoImmeBolusInfusionInfoEntity?
-    fun getExtendBolusInfusionInfo(): CarelevoExtendBolusInfusionInfoEntity?
-
     fun updateBasalInfusionInfo(info: CarelevoBasalInfusionInfoEntity): Boolean
     fun updateTempBasalInfusionInfo(info: CarelevoTempBasalInfusionInfoEntity): Boolean
     fun updateImmeBolusInfusionInfo(info: CarelevoImmeBolusInfusionInfoEntity): Boolean
     fun updateExtendBolusInfusionInfo(info: CarelevoExtendBolusInfusionInfoEntity): Boolean
-    fun updateInfusionInfo(info: CarelevoInfusionInfoEntity): Boolean
 
     fun deleteBasalInfusionInfo(): Boolean
     fun deleteTempBasalInfusionInfo(): Boolean

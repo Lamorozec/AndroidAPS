@@ -15,7 +15,7 @@ class CarelevoAlarmInfoLocalDataSourceImpl @Inject constructor(
     override fun observeAlarms(): Observable<Optional<List<CarelevoAlarmInfoEntity>>> =
         dao.getAlarms()
 
-    override fun getAlarmsOnce(includeUnacknowledged: Boolean): Single<Optional<List<CarelevoAlarmInfoEntity>>> = dao.getAlarmsOnce(includeUnacknowledged)
+    override fun getAlarmsOnce(): Single<Optional<List<CarelevoAlarmInfoEntity>>> = dao.getAlarmsOnce()
 
     override fun setAlarms(list: List<CarelevoAlarmInfoEntity>): Completable =
         dao.setAlarms(list)
@@ -23,8 +23,8 @@ class CarelevoAlarmInfoLocalDataSourceImpl @Inject constructor(
     override fun upsertAlarm(entity: CarelevoAlarmInfoEntity): Completable =
         dao.upsertAlarm(entity)
 
-    override fun markAcknowledged(alarmId: String, acknowledged: Boolean, updatedAt: String): Completable =
-        dao.markAcknowledged(alarmId, acknowledged, updatedAt)
+    override fun removeAlarm(alarmId: String): Completable =
+        dao.removeAlarm(alarmId)
 
     override fun clearAlarms(): Completable =
         dao.clearAlarms()

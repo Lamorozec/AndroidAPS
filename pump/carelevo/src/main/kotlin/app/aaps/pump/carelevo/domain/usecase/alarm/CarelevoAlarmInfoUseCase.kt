@@ -5,11 +5,10 @@ import app.aaps.pump.carelevo.domain.repository.CarelevoAlarmInfoRepository
 import io.reactivex.rxjava3.core.Completable
 import io.reactivex.rxjava3.core.Observable
 import io.reactivex.rxjava3.core.Single
-import java.time.LocalDateTime
-import java.time.format.DateTimeFormatter
 import java.util.Optional
 import javax.inject.Inject
 
+/** Domain seam over [CarelevoAlarmInfoRepository]: the persisted set of ACTIVE patch alarms. */
 class CarelevoAlarmInfoUseCase @Inject constructor(
     private val repository: CarelevoAlarmInfoRepository
 ) {
@@ -17,13 +16,15 @@ class CarelevoAlarmInfoUseCase @Inject constructor(
     fun observeAlarms(): Observable<Optional<List<CarelevoAlarmInfo>>> =
         repository.observeAlarms()
 
-    fun getAlarmsOnce(includeUnacknowledged: Boolean = false): Single<Optional<List<CarelevoAlarmInfo>>> = repository.getAlarmsOnce(includeUnacknowledged)
+    /** One-shot read of all stored (= active) alarms. */
+    fun getAlarmsOnce(): Single<Optional<List<CarelevoAlarmInfo>>> = repository.getAlarmsOnce()
 
     fun upsertAlarm(alarm: CarelevoAlarmInfo): Completable =
         repository.upsertAlarm(alarm)
 
+    /** Acknowledge = remove from the store; there is no acknowledged-alarm history. */
     fun acknowledgeAlarm(alarmId: String): Completable =
-        repository.markAcknowledged(alarmId, acknowledged = true, updatedAt = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd hh:mm:ss")))
+        repository.removeAlarm(alarmId)
 
     fun clearAlarms(): Completable =
         repository.clearAlarms()

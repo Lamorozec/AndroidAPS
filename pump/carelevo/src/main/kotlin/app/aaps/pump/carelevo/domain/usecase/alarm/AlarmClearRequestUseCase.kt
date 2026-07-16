@@ -3,7 +3,6 @@ package app.aaps.pump.carelevo.domain.usecase.alarm
 import app.aaps.pump.carelevo.domain.repository.CarelevoAlarmInfoRepository
 import app.aaps.pump.carelevo.domain.type.AlarmCause
 import app.aaps.pump.carelevo.domain.type.AlarmType
-import java.time.LocalDateTime
 
 class AlarmClearRequestUseCase(
     private val alarmRepository: CarelevoAlarmInfoRepository
@@ -20,11 +19,11 @@ class AlarmClearRequestUseCase(
     }
 
     /**
-     * Persist the alarm acknowledgement (`markAcknowledged`) after a successful alarm-clear write. Returns
-     * false if the write throws.
+     * Persist the alarm acknowledgement (remove from the alarm store) after a successful
+     * alarm-clear write. Returns false if the write throws.
      */
     fun persistAlarmCleared(alarmId: String): Boolean = runCatching {
-        alarmRepository.markAcknowledged(alarmId = alarmId, acknowledged = true, updatedAt = LocalDateTime.now().toString()).blockingAwait()
+        alarmRepository.removeAlarm(alarmId).blockingAwait()
     }.isSuccess
 
     companion object {

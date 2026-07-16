@@ -100,9 +100,8 @@ class CarelevoPatchConnectViewModel @Inject constructor(
 
     /**
      * Discovery scan over the transport. `scanAddress = null` puts `CarelevoBleTransportImpl`'s scanner
-     * in service-UUID discovery mode (built for this wizard); the first advertising patch wins — the
-     * legacy scan likewise auto-picked its top result. Stops early on a hit instead of always burning
-     * the full window.
+     * in service-UUID discovery mode; the first advertising patch wins. Stops early on a hit instead of
+     * always burning the full window.
      */
     fun startScan() {
         if (!carelevoPatch.isBluetoothEnabled()) {
@@ -153,7 +152,7 @@ class CarelevoPatchConnectViewModel @Inject constructor(
                 viewModelScope.launch {
                     val result = commandQueue.customCommand(CmdDiscard())
                     if (result.success) {
-                        // unBond + releasePatch now run inside CmdDiscard on the queue thread
+                        // unBond + releasePatch run inside CmdDiscard on the queue thread
                         setUiState(UiState.Idle)
                         triggerEvent(CarelevoConnectPrepareEvent.DiscardComplete)
                     } else {
@@ -200,7 +199,7 @@ class CarelevoPatchConnectViewModel @Inject constructor(
     }
 
     /**
-     * Pair the scanned patch: clear any stale bond (legacy `clearBond` parity) → one
+     * Pair the scanned patch: clear any stale bond → one
      * [CarelevoBleSession.runPairing] session (connect → bond → MAC/auth/set-time→patch-info/alarm/
      * threshold) → persist via the use case's `persistNewPatch`. No btState observer needed — the session
      * owns its connect handshake and either returns or throws. After success the CommandQueue (activation
@@ -287,7 +286,7 @@ class CarelevoPatchConnectViewModel @Inject constructor(
 
     private companion object {
 
-        // Legacy scanned a fixed 10 s window; same budget, but this scan completes early on the first hit.
+        // 10 s scan window; completes early on the first hit.
         private const val SCAN_TIMEOUT_MS = 10_000L
     }
 }

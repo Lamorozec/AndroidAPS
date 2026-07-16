@@ -469,7 +469,7 @@ class CarelevoOverviewViewModel @Inject constructor(
                     val result = commandQueue.customCommand(CmdDiscard())
                     if (result.success) {
                         aapsLogger.debug(LTag.PUMPCOMM, "[startDiscard] success")
-                        // unBond + releasePatch now run inside CmdDiscard on the queue thread
+                        // unBond + releasePatch run inside CmdDiscard on the queue thread
                         setUiState(UiState.Idle)
                     } else {
                         aapsLogger.error(LTag.PUMPCOMM, "[startDiscard] failed, falling back to force-discard")
@@ -852,19 +852,24 @@ class CarelevoOverviewViewModel @Inject constructor(
         val tempBasalRate: Double?
     )
 
+    /** Canonical clock for the expiry countdown — [dateUtil] so tests can inject a fake time. */
+    private fun nowLocal(): LocalDateTime =
+        LocalDateTime.ofInstant(Instant.ofEpochMilli(dateUtil.now()), ZoneId.systemDefault())
+
     private fun getRemainMin(createdAt: LocalDateTime): Int {
         val endAt = createdAt.plusDays(7)
-        var remainMin = ChronoUnit.MINUTES.between(LocalDateTime.now(), endAt)
+        val now = nowLocal()
+        var remainMin = ChronoUnit.MINUTES.between(now, endAt)
 
-        if (LocalDateTime.now().isAfter(endAt)) {
-            remainMin = ChronoUnit.MINUTES.between(endAt, LocalDateTime.now())
+        if (now.isAfter(endAt)) {
+            remainMin = ChronoUnit.MINUTES.between(endAt, now)
         }
 
         return remainMin.toInt()
     }
 
     private fun getExpireAtText(createdAt: LocalDateTime): String {
-        val now = LocalDateTime.now()
+        val now = nowLocal()
         val baseEnd = createdAt.plusDays(7)
 
         val expireAt = if (now.isAfter(baseEnd)) {
@@ -882,7 +887,7 @@ class CarelevoOverviewViewModel @Inject constructor(
             return
         }
         // Route through the queue: connect-before-read so an idle-disconnected patch reconnects,
-        // reads status, then the queue idle-disconnects — instead of no-op'ing when disconnected.
+        // reads status, then the queue idle-disconnects.
         viewModelScope.launch {
             commandQueue.readStatus("Carelevo overview refresh")
         }

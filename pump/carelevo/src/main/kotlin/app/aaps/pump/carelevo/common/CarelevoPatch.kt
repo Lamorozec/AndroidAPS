@@ -43,6 +43,7 @@ import io.reactivex.rxjava3.kotlin.plusAssign
 import io.reactivex.rxjava3.subjects.BehaviorSubject
 import java.time.LocalDateTime
 import java.util.Optional
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
@@ -256,8 +257,8 @@ class CarelevoPatch @Inject constructor(
     }
 
     /**
-     * The only btState source now: the plugin's Bluetooth broadcast receiver (adapter on/off) plus its
-     * startup seed. Raises the Bluetooth-off alarm on the ON→OFF edge, exactly like the legacy observer.
+     * btState source: the plugin's Bluetooth broadcast receiver (adapter on/off) plus its startup
+     * seed. Raises the Bluetooth-off alarm on the ON→OFF edge.
      */
     fun onBluetoothStateChanged(state: BleState) {
         aapsLogger.debug(LTag.PUMPCOMM, "btState : $state")
@@ -275,9 +276,9 @@ class CarelevoPatch @Inject constructor(
     }
 
     fun flushPatchInformation() {
-        // Clear cached patch/infusion info. This resets isCheckScreen (was keeping the wizard latched
-        // to SAFETY_CHECK after a mid-activation discard) and immediately drops patchState to
-        // NotConnectedNotBooting. There is no resting GATT to tear down — sessions are per-op.
+        // Clear cached patch/infusion info. This resets isCheckScreen (which otherwise keeps the
+        // wizard latched to SAFETY_CHECK after a mid-activation discard) and immediately drops
+        // patchState to NotConnectedNotBooting. There is no resting GATT to tear down — sessions are per-op.
         _patchInfo.onNext(Optional.empty())
         _infusionInfo.onNext(Optional.empty())
     }
@@ -295,22 +296,28 @@ class CarelevoPatch @Inject constructor(
             aapsLogger.debug(LTag.PUMPCOMM, "discardTeardown skipped (already in progress)")
             return
         }
+        // Unbond and flush independently: a failed unbond (adapter gone, bond already removed)
+        // must never leave the discarded patch's cached info behind — a stale record would keep
+        // patchState at ConnectedBooted and re-latch the wizard's check screens.
         try {
             getPatchInfoAddress()?.let { transport.adapter.removeBond(it.uppercase()) }
+        } catch (e: Exception) {
+            aapsLogger.error(LTag.PUMPCOMM, "discardTeardown unbond error", e)
+        }
+        try {
             releasePatch()
         } catch (e: Exception) {
-            aapsLogger.error(LTag.PUMPCOMM, "discardTeardown error", e)
+            aapsLogger.error(LTag.PUMPCOMM, "discardTeardown release error", e)
         } finally {
             discardInProgress.set(false)
         }
     }
 
     /**
-     * Persist an infusion-info report decoded by the new [app.aaps.pump.carelevo.ble.BleClient] stack
-     * (Phase 2). [pumpStateRaw]/[modeRaw] are the raw 0x91 bytes; they are normalized through the same
-     * int→enum→int round-trip the legacy `_patchEvent` path uses (`codeTo…().commandToCode()`) so the
-     * persisted values are byte-for-byte identical. Mirrors `updateInfusionInfo` but sourced from the
-     * new command instead of the Rx `_patchEvent` subject.
+     * Persist an infusion-info report decoded by the [app.aaps.pump.carelevo.ble.BleClient] stack.
+     * [pumpStateRaw]/[modeRaw] are the raw 0x91 bytes; they are normalized through the
+     * `codeTo…().commandToCode()` round-trip the persisted codes require, so the persisted values
+     * are byte-for-byte identical to a full decode.
      */
     fun applyInfusionInfoReport(
         runningMinutes: Int,
@@ -328,7 +335,7 @@ class CarelevoPatch @Inject constructor(
                 infusedTotalBolusAmount = infusedTotalBolusAmount,
                 pumpState = pumpStateRaw.codeToPumpStateCommand().commandToCode(),
                 mode = modeRaw.codeToInfusionModeCommand().commandToCode(),
-                currentInfusedProgramVolume = 0.0, // not persisted by the process use case (legacy drops it too)
+                currentInfusedProgramVolume = 0.0, // not persisted by the process use case
                 realInfusedTime = 0
             )
         )
@@ -343,14 +350,16 @@ class CarelevoPatch @Inject constructor(
     }
 
     /**
-     * Raise a patch alarm locally (alarm DB + notifier pipeline). Public seam: the future long-lived
-     * `unsolicitedEvents` bridge (queue-owned-link phase) feeds pump-pushed alert/warning/notice frames
-     * here; today it is used for the Bluetooth-off alert.
+     * Raise a patch alarm locally (alarm DB + notifier pipeline). Public seam: the long-lived
+     * `unsolicitedEvents` bridge feeds pump-pushed alert/warning/notice frames here; today it is
+     * used for the Bluetooth-off alert.
      */
     fun handleAlarm(modelType: String, value: Int?, cause: AlarmCause) {
         aapsLogger.debug(LTag.PUMPCOMM, "$modelType report : $value, $cause")
         val info = CarelevoAlarmInfo(
-            alarmId = System.currentTimeMillis().toString(),
+            // UUID, not a millisecond timestamp — two alarms raised in the same millisecond (rapid
+            // BLE flapping) would otherwise collide and one would silently overwrite the other.
+            alarmId = UUID.randomUUID().toString(),
             alarmType = cause.alarmType,
             cause = cause,
             value = value,

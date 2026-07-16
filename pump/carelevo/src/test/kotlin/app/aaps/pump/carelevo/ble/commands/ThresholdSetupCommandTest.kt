@@ -24,9 +24,13 @@ internal class ThresholdSetupCommandTest {
     }
 
     @Test
-    fun `insulinRemainsThreshold over 255 wraps to one byte (legacy overflow quirk)`() {
-        val bytes = ThresholdSetupCommand(300, 116, 2.5, 15.0, buzzUse = true).encode()
-        assertThat(bytes[1]).isEqualTo(300.toByte()) // 300 -> 0x2C = 44
+    fun `insulinRemainsThreshold over 255 is rejected`() {
+        // The threshold is a single wire byte, so 300 would wrap to 0x2C = 44 — a silently
+        // misprogrammed low-insulin alarm. Reject it loudly instead.
+        assertFailsWith<IllegalArgumentException> { ThresholdSetupCommand(300, 116, 2.5, 15.0, buzzUse = true) }
+        // 255 is the highest value that still fits the single wire byte.
+        val bytes = ThresholdSetupCommand(255, 116, 2.5, 15.0, buzzUse = true).encode()
+        assertThat(bytes[1]).isEqualTo(255.toByte())
     }
 
     @Test

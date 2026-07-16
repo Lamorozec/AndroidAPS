@@ -13,16 +13,10 @@ interface CarelevoInfusionInfoRepository {
     fun getInfusionInfo(): Observable<Optional<CarelevoInfusionInfoDomainModel>>
     fun getInfusionInfoBySync(): CarelevoInfusionInfoDomainModel?
 
-    fun getBasalInfusionInfo(): CarelevoBasalInfusionInfoDomainModel?
-    fun getTempBasalInfusionInfo(): CarelevoTempBasalInfusionInfoDomainModel?
-    fun getImmeBolusInfusionInfo(): CarelevoImmeBolusInfusionInfoDomainModel?
-    fun getExtendBolusInfusionInfo(): CarelevoExtendBolusInfusionInfoDomainModel?
-
     fun updateBasalInfusionInfo(info: CarelevoBasalInfusionInfoDomainModel): Boolean
     fun updateTempBasalInfusionInfo(info: CarelevoTempBasalInfusionInfoDomainModel): Boolean
     fun updateImmeBolusInfusionInfo(info: CarelevoImmeBolusInfusionInfoDomainModel): Boolean
     fun updateExtendBolusInfusionInfo(info: CarelevoExtendBolusInfusionInfoDomainModel): Boolean
-    fun updateInfusionInfo(info: CarelevoInfusionInfoDomainModel): Boolean
 
     fun deleteBasalInfusionInfo(): Boolean
     fun deleteTempBasalInfusionInfo(): Boolean

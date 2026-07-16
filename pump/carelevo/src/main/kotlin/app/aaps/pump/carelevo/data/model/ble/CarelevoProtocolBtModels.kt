@@ -135,15 +135,6 @@ data class ProtocolPatchInformationInquiryRptModel(
     override val timestamp: Long,
     override val command: Int,
     val result: Int,
-    // val productCL : String,
-    // val productTY : String,
-    // val productMO : String,
-    // val processCO : String,
-    // val manufactureYE : String,
-    // val manufactureMO : String,
-    // val manufactureDA : String,
-    // val manufactureLO : String,
-    // val manufactureNO : String,
     val serialNum: String
 ) : ProtocolRspModel
 
@@ -215,7 +206,6 @@ data class ProtocolGlucoseTimerRptModel(
 data class ProtocolPatchAddressRspModel(
     override val timestamp: Long,
     override val command: Int,
-    // val value : Int,
     val macAddress: String,
     val checkSum: String
 ) : ProtocolRspModel

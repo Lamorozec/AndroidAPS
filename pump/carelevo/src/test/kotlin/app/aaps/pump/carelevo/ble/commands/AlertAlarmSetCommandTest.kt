@@ -19,8 +19,8 @@ internal class AlertAlarmSetCommandTest {
     }
 
     @Test
-    fun `encode high mode wraps like legacy toByte (no range check)`() {
-        // legacy IntegerToByte(0,0) is the skip-validation sentinel: no bounds, raw mode.toByte()
+    fun `encode high mode wraps to one byte (no range check)`() {
+        // No bounds check: the mode is emitted as a raw mode.toByte(), so values > 0x7F wrap.
         assertThat(AlertAlarmSetCommand(mode = 200).encode().toList())
             .containsExactly(0x48.toByte(), 200.toByte()).inOrder()
     }

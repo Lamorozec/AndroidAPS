@@ -34,6 +34,7 @@ import app.aaps.core.ui.R as CoreUiR
 import app.aaps.core.ui.compose.pump.WizardButton
 import app.aaps.core.ui.compose.pump.WizardStepLayout
 import app.aaps.pump.carelevo.R
+import app.aaps.pump.carelevo.config.FillConfig
 import app.aaps.pump.carelevo.presentation.viewmodel.CarelevoPatchConnectionFlowViewModel
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
@@ -51,7 +52,7 @@ internal fun CarelevoSetAmountStep(
     viewModel: CarelevoPatchConnectionFlowViewModel
 ) {
     var selectedValue by remember { mutableIntStateOf(viewModel.inputInsulin) }
-    val values = remember { (50..300 step 10).toList() }
+    val values = remember { (FillConfig.FILL_MIN_UNITS..FillConfig.FILL_MAX_UNITS step FillConfig.FILL_STEP_UNITS).toList() }
 
     WizardStepLayout(
         primaryButton = WizardButton(
@@ -65,7 +66,7 @@ internal fun CarelevoSetAmountStep(
         scrollable = false
     ) {
         Text(
-            text = stringResource(R.string.patch_prepare_dialog_msg_insulin_range),
+            text = stringResource(R.string.patch_prepare_dialog_msg_insulin_range, FillConfig.FILL_MIN_UNITS, FillConfig.FILL_MAX_UNITS),
             style = MaterialTheme.typography.bodyMedium
         )
         Box(

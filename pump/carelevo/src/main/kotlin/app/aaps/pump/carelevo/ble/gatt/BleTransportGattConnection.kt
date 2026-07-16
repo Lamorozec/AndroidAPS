@@ -13,11 +13,9 @@ import kotlinx.coroutines.sync.withLock
 import java.util.UUID
 
 /**
- * Adapts the shared fleet [BleTransport] to carelevo's [GattConnection] contract, so the existing
- * [app.aaps.pump.carelevo.ble.BleClientImpl] correlation layer runs unchanged on the same BLE
- * transport abstraction Dana/Equil/Medtrum use. This is the seam that lets carelevo unify onto
- * [BleTransport] without rewriting [app.aaps.pump.carelevo.ble.BleClient] — see
- * `_docs/carelevo-new-ble-stack.md` (Phase 1).
+ * Adapts the shared fleet [BleTransport] to carelevo's [GattConnection] contract, so the
+ * [app.aaps.pump.carelevo.ble.BleClientImpl] correlation layer runs on the same BLE transport
+ * abstraction Dana/Equil/Medtrum use.
  *
  * It registers itself as the transport's single [BleTransportListener] and translates each callback
  * into either:
@@ -25,9 +23,8 @@ import java.util.UUID
  * - a [GattEvent] on the hot [events] flow (for [BleClient]'s notification routing and
  *   connection-state observers).
  *
- * Uses the same per-op [CompletableDeferred] + events-[SharedFlow] internals a raw `BluetoothGatt`
- * wrapper would; the only source difference is that events arrive via [BleTransportListener] instead
- * of a `BluetoothGattCallback`.
+ * Internally: per-op [CompletableDeferred]s for the suspend ops plus an events-[SharedFlow] fed from
+ * the [BleTransportListener] callbacks.
  *
  * **Semantic note (write acks):** [BleTransportListener.onCharacteristicWritten] carries
  * no status, so a write the BLE stack silently drops is NOT fast-failed with [GattWriteException] —
@@ -41,9 +38,13 @@ import java.util.UUID
  * constructor UUIDs rather than used for routing — a mismatched UUID fails loudly instead of silently
  * targeting the wrong characteristic.
  *
- * Threading: [gattMutex] serializes suspend ops; events are emitted on [scope];
- * `CompletableDeferred.complete(...)` is thread-safe and called directly from the (binder thread)
- * listener callbacks.
+ * Threading: [gattMutex] serializes suspend ops; `CompletableDeferred.complete(...)` is thread-safe
+ * and called directly from the (binder thread) listener callbacks. Events are likewise emitted
+ * SYNCHRONOUSLY from the callbacks via [emitEvent] (`tryEmit` into the 64-slot buffer) — an async
+ * `scope.launch { emit(...) }` detour would open a lost-event window at session teardown: a
+ * response arriving just as the per-op timeout cancels [scope] would silently never reach
+ * [BleClient]'s router, and a pump that DID execute a dose command would be reported as failed.
+ * [scope] is only a fallback for the (pathological) buffer-full case.
  *
  * One adapter instance owns the transport's single listener slot for one connection lifecycle;
  * [close] releases it.
@@ -152,9 +153,18 @@ class BleTransportGattConnection(
 
     // ===== BleTransportListener =====
 
+    /**
+     * Delivers [event] to [events] synchronously on the calling (binder) thread. Falls back to an
+     * async emit only if the buffer is full — see the class-level threading note for why the
+     * synchronous path is load-bearing.
+     */
+    private fun emitEvent(event: GattEvent) {
+        if (!_events.tryEmit(event)) scope.launch { _events.emit(event) }
+    }
+
     override fun onConnectionStateChanged(connected: Boolean) {
         val state = if (connected) GattConnState.CONNECTED else GattConnState.DISCONNECTED
-        scope.launch { _events.emit(GattEvent.ConnectionStateChanged(state)) }
+        emitEvent(GattEvent.ConnectionStateChanged(state))
         if (!connected) {
             // Connection gone — abort any in-flight operations (BleClient aborts its own request
             // waiter separately off the DISCONNECTED event).
@@ -166,7 +176,7 @@ class BleTransportGattConnection(
 
     override fun onServicesDiscovered(success: Boolean) {
         discoveryAck?.complete(success)
-        scope.launch { _events.emit(GattEvent.ServicesDiscovered(success)) }
+        emitEvent(GattEvent.ServicesDiscovered(success))
     }
 
     override fun onDescriptorWritten() {
@@ -176,13 +186,12 @@ class BleTransportGattConnection(
     }
 
     override fun onCharacteristicChanged(data: ByteArray) {
-        val copy = data.copyOf()
-        scope.launch { _events.emit(GattEvent.Notification(notifyUuid, copy)) }
+        emitEvent(GattEvent.Notification(notifyUuid, data.copyOf()))
     }
 
     override fun onCharacteristicWritten() {
         // No status on the shared listener — a delivered write-ack is treated as success.
         writeAck?.complete(true)
-        scope.launch { _events.emit(GattEvent.WriteAck(writeUuid, true)) }
+        emitEvent(GattEvent.WriteAck(writeUuid, true))
     }
 }

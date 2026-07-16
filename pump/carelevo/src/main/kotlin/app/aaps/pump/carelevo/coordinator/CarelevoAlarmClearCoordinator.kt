@@ -67,12 +67,16 @@ class CarelevoAlarmClearCoordinator @Inject constructor(
     suspend fun resumeInfusion(): Boolean = opMutex.withLock {
         val success = commandQueue.customCommand(CmdPumpResume()).success
         if (success) {
-            pumpSync.syncStopTemporaryBasalWithPumpId(
-                timestamp = dateUtil.now(),
-                endPumpId = dateUtil.now(),
-                pumpType = PumpType.CAREMEDI_CARELEVO,
-                pumpSerial = carelevoPatch.patchInfo.value?.getOrNull()?.manufactureNumber ?: ""
-            )
+            // Only record a TBR stop if AAPS actually believes one is running — an unguarded stop
+            // would write a spurious end-marker into treatment history on a plain resume.
+            if (pumpSync.expectedPumpState().temporaryBasal != null) {
+                pumpSync.syncStopTemporaryBasalWithPumpId(
+                    timestamp = dateUtil.now(),
+                    endPumpId = dateUtil.now(),
+                    pumpType = PumpType.CAREMEDI_CARELEVO,
+                    pumpSerial = carelevoPatch.patchInfo.value?.getOrNull()?.manufactureNumber ?: ""
+                )
+            }
         }
         success
     }

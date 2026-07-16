@@ -8,12 +8,8 @@ import app.aaps.pump.carelevo.ble.BleCommand
  *
  * Request wire format (2 bytes): `[0] 0x48, [1] mode` — [mode] is written as a **raw byte**.
  *
- * **Quirk — no range validation:** legacy `setAlarmMode` encodes the argument with
- * `CarelevoIntegerToByteTransformerImpl(0, 0)`, and that transformer treats `min == max == 0` as a
- * "skip range-check" sentinel (its guard is `item !in min..max && !(min == 0 && max == 0)` — always
- * `false` when both are 0). So it applies no bounds and just returns `byteArrayOf(mode.toByte())`.
- * To stay byte-for-byte we likewise perform **no** `init {}` range check and emit `mode.toByte()`
- * verbatim (values > 0x7F wrap, exactly as the legacy `.toByte()` does).
+ * **Quirk — no range validation:** [mode] is not range-checked; it is emitted as `mode.toByte()`
+ * verbatim, so values > 0x7F wrap on the wire.
  *
  * Response (0xA8): `[0] 0xA8, [1] resultCode` → [SimpleResultResponse] (0 = SUCCESS).
  */

@@ -1,6 +1,8 @@
 package app.aaps.pump.carelevo.domain.usecase.infusion
 
 import app.aaps.pump.carelevo.domain.model.ResponseResult
+import app.aaps.pump.carelevo.domain.model.infusion.CarelevoPatchMode
+import app.aaps.pump.carelevo.domain.model.infusion.derivePatchMode
 import app.aaps.pump.carelevo.domain.model.result.ResultSuccess
 import app.aaps.pump.carelevo.domain.repository.CarelevoInfusionInfoRepository
 import app.aaps.pump.carelevo.domain.repository.CarelevoPatchInfoRepository
@@ -41,17 +43,9 @@ class CarelevoDeleteInfusionInfoUseCase @Inject constructor(
                 val infusionInfo = infusionInfoRepository.getInfusionInfoBySync()
                     ?: error("Infusion info must not be null after deletion step")
 
-                val mode = when {
-                    infusionInfo.extendBolusInfusionInfo != null -> 5
-                    infusionInfo.immeBolusInfusionInfo != null   -> 3
-                    infusionInfo.tempBasalInfusionInfo != null   -> 2
-
-                    infusionInfo.basalInfusionInfo != null       -> {
-                        if (infusionInfo.basalInfusionInfo.isStop) 0 else 1
-                    }
-
-                    else                                         -> 0
-                }
+                // Delete/discard path: nothing left running means the patch is stopped, so fall
+                // back to BASAL_STOPPED (the mid-therapy persists treat the same case as an error).
+                val mode = infusionInfo.derivePatchMode() ?: CarelevoPatchMode.BASAL_STOPPED
 
                 val now = DateTime.now()
                 val patchInfo = patchInfoRepository.getPatchInfoBySync()
@@ -67,6 +61,7 @@ class CarelevoDeleteInfusionInfoUseCase @Inject constructor(
                 onSuccess = { ResponseResult.Success(it as CarelevoUseCaseResponse) },
                 onFailure = { ResponseResult.Error(it) }
             )
-        }.observeOn(Schedulers.io())
+            // subscribeOn, NOT observeOn — see CarelevoFinishImmeBolusInfusionUseCase.
+        }.subscribeOn(Schedulers.io())
     }
 }

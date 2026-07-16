@@ -13,9 +13,6 @@ import kotlin.jvm.optionals.getOrNull
  * OWN GATT session, so there is no resting link for the queue to manage — [isConnected] is always true
  * (matching Omnipod/Medtrum-style patch pumps) and [connect]/[disconnect] are no-ops kept only for the
  * `Pump` interface contract. [isInitialized] stays activation-based.
- *
- * A future queue-owned long-lived session (Phase 2.D follow-up, see `_docs/carelevo-new-ble-stack.md`)
- * would reintroduce a real lifecycle here.
  */
 @Singleton
 class CarelevoConnectionCoordinator @Inject constructor(

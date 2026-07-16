@@ -1,6 +1,7 @@
 package app.aaps.pump.carelevo.domain.usecase.bolus
 
 import app.aaps.pump.carelevo.domain.model.ResponseResult
+import app.aaps.pump.carelevo.domain.model.infusion.derivePatchMode
 import app.aaps.pump.carelevo.domain.model.result.ResultSuccess
 import app.aaps.pump.carelevo.domain.repository.CarelevoInfusionInfoRepository
 import app.aaps.pump.carelevo.domain.repository.CarelevoPatchInfoRepository
@@ -28,21 +29,8 @@ class CarelevoFinishImmeBolusInfusionUseCase @Inject constructor(
                 val patchInfo = patchInfoRepository.getPatchInfoBySync()
                     ?: throw NullPointerException("patch info must be not null")
 
-                val mode = if (infusionInfo.extendBolusInfusionInfo != null) {
-                    5
-                } else if (infusionInfo.immeBolusInfusionInfo != null) {
-                    3
-                } else if (infusionInfo.tempBasalInfusionInfo != null) {
-                    2
-                } else if (infusionInfo.basalInfusionInfo != null) {
-                    if (infusionInfo.basalInfusionInfo.isStop) {
-                        0
-                    } else {
-                        1
-                    }
-                } else {
-                    throw NullPointerException("infusion info must be not null")
-                }
+                val mode = infusionInfo.derivePatchMode()
+                    ?: throw NullPointerException("infusion info must be not null")
 
                 val updatePatchInfoResult = patchInfoRepository.updatePatchInfo(
                     patchInfo.copy(updatedAt = DateTime.now(), mode = mode)
@@ -59,6 +47,8 @@ class CarelevoFinishImmeBolusInfusionUseCase @Inject constructor(
                     ResponseResult.Error(it)
                 }
             )
-        }.observeOn(Schedulers.io())
+            // subscribeOn, NOT observeOn: for Single.fromCallable the callable (blocking prefs/Gson
+            // I/O) runs on the SUBSCRIBING thread; observeOn only moves downstream operators.
+        }.subscribeOn(Schedulers.io())
     }
 }

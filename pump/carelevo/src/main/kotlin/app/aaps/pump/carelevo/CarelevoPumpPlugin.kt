@@ -34,11 +34,13 @@ import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.rx.AapsSchedulers
 import app.aaps.core.interfaces.sharedPreferences.SP
 import app.aaps.core.interfaces.ui.IconsProvider
+import app.aaps.core.interfaces.ui.UiInteraction
 import app.aaps.core.interfaces.utils.fabric.FabricPrivacy
 import app.aaps.core.keys.DoubleKey
 import app.aaps.core.keys.IntKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.keys.interfaces.withEntries
+import app.aaps.core.ui.R as CoreUiR
 import app.aaps.core.ui.compose.icons.IcPluginCarelevo
 import app.aaps.core.ui.compose.preference.PreferenceSubScreenDef
 import app.aaps.pump.carelevo.ble.CarelevoBleSession
@@ -70,8 +72,8 @@ import app.aaps.pump.carelevo.coordinator.CarelevoTempBasalCoordinator
 import app.aaps.pump.carelevo.domain.model.alarm.CarelevoAlarmInfo
 import app.aaps.pump.carelevo.domain.model.infusion.CarelevoInfusionInfoDomainModel
 import app.aaps.pump.carelevo.domain.model.userSetting.CarelevoUserSettingInfoDomainModel
-import app.aaps.pump.carelevo.domain.type.AlarmCause
 import app.aaps.pump.carelevo.domain.type.AlarmType.Companion.isCritical
+import app.aaps.pump.carelevo.ext.transformNotificationStringResources
 import io.reactivex.rxjava3.core.Completable
 import io.reactivex.rxjava3.core.Observable
 import io.reactivex.rxjava3.disposables.CompositeDisposable
@@ -110,6 +112,7 @@ class CarelevoPumpPlugin @Inject constructor(
     private val protectionCheck: ProtectionCheck,
     private val blePreCheck: BlePreCheck,
     private val iconsProvider: IconsProvider,
+    private val uiInteraction: UiInteraction,
     private var pumpEnactResultProvider: Provider<PumpEnactResult>,
     private val carelevoPatch: CarelevoPatch,
 
@@ -212,8 +215,7 @@ class CarelevoPumpPlugin @Inject constructor(
             .drop(1)
             .onEach {
                 val hours = sp.getInt(CarelevoIntPreferenceKey.CARELEVO_LOW_INSULIN_EXPIRATION_REMINDER_HOURS.key, 0)
-                // Zero = reminder off; skip enqueuing so the pump isn't reconnected just to no-op (parity
-                // with the old coordinator's zero-skip).
+                // Zero = reminder off; skip enqueuing so the pump isn't reconnected just to no-op.
                 if (hours != 0) commandQueue.customCommand(CmdUpdateLowInsulinNotice(hours))
             }
             .launchIn(newScope)
@@ -229,8 +231,7 @@ class CarelevoPumpPlugin @Inject constructor(
         // Deferred settings-sync recovery: a max-bolus / low-insulin change that couldn't reach the patch
         // (changed while offline, or during a bolus) leaves a needXSyncPatch flag on the stored user
         // settings; when the patch is booted again, push it through the queue. The combiner is PURE and the
-        // enqueue runs on IO — replaces the old side-effecting combineLatest in CarelevoPatch that ran on the
-        // main thread and called the use cases directly (bypassing the queue).
+        // enqueue runs on IO.
         pluginDisposable += Observable.combineLatest(
             carelevoPatch.patchState,
             carelevoPatch.infusionInfo,
@@ -375,21 +376,37 @@ class CarelevoPumpPlugin @Inject constructor(
         }
     }
 
+    // Critical alarms already escalated to the global alarm (so a re-emission of the same list
+    // doesn't re-fire the sound). Pruned to the currently-active set on every pass.
+    private val globallyAlarmedIds = mutableSetOf<String>()
+
     private fun handleAlarms(alarms: List<CarelevoAlarmInfo>) {
         aapsLogger.debug(LTag.NOTIFICATION, "startAlarmObserving handleAlarms:: $alarms")
+        globallyAlarmedIds.retainAll(alarms.map { it.alarmId }.toSet())
         if (alarms.isEmpty()) return
 
-        if (
-            alarms.any {
-                it.alarmType.isCritical() ||
-                    it.cause == AlarmCause.ALARM_ALERT_BLUETOOTH_OFF
+        val critical = alarms.filter { it.alarmType.isCritical() }
+        if (critical.isNotEmpty()) {
+            // filter-with-add: keeps only the not-yet-escalated alarms AND marks them escalated.
+            val fresh = critical.filter { globallyAlarmedIds.add(it.alarmId) }
+            if (carelevoAlarmNotifier.alarmHostActive) {
+                // The in-app host is mounted — it presents the full-screen alarm and starts the
+                // sound itself (CarelevoAlarmHost/CarelevoAlarmViewModel).
+                aapsLogger.debug(LTag.NOTIFICATION, "critical alarm handled by compose host")
+            } else if (fresh.isNotEmpty()) {
+                // No in-app surface (backgrounded, or user on another screen): fire the global AAPS
+                // alarm (sound + full-screen intent) — a critical patch alarm must NEVER depend on
+                // the user having the Carelevo screen open.
+                val first = fresh.first()
+                uiInteraction.runAlarm(
+                    status = rh.gs(first.cause.transformNotificationStringResources().first),
+                    title = rh.gs(R.string.carelevo),
+                    soundId = CoreUiR.raw.error
+                )
             }
-        ) {
-            aapsLogger.debug(LTag.NOTIFICATION, "critical alarm handled by compose host")
         } else {
             carelevoAlarmNotifier.showTopNotification(alarms)
         }
-
     }
 
     override fun getPreferenceScreenContent() = PreferenceSubScreenDef(
@@ -457,8 +474,8 @@ class CarelevoPumpPlugin @Inject constructor(
 
     /**
      * Status read over the [app.aaps.pump.carelevo.ble.BleClient] stack: read Infusion Info (0x31 → 0x91)
-     * on the session's own connection and persist it through the SAME seam the legacy `_patchEvent` path
-     * used (`carelevoPatch.applyInfusionInfoReport`) — reservoir/pump-state/totals all refresh. Runs on
+     * on the session's own connection and persist it through `carelevoPatch.applyInfusionInfoReport` —
+     * reservoir/pump-state/totals all refresh. Runs on
      * the QueueWorker thread, blocked inside this status read.
      */
     private suspend fun readInfusionInfo() {
@@ -579,6 +596,10 @@ class CarelevoPumpPlugin @Inject constructor(
         )
     }
 
+    // enforceNew is intentionally ignored on all three TBR entry points: with per-op sessions there
+    // is no resting link whose state a "keep the running TBR" optimization could trust, so Carelevo
+    // always re-programs the requested TBR (the Pump contract explicitly allows this; the flag is
+    // only an optimization hint).
     override suspend fun setTempBasalAbsolute(absoluteRate: Double, durationInMinutes: Int, enforceNew: Boolean, tbrType: PumpSync.TemporaryBasalType): PumpEnactResult {
         return tempBasalCoordinator.setTempBasalAbsolute(
             absoluteRate = absoluteRate,

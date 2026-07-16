@@ -81,7 +81,6 @@ internal fun isPatchProtocol(command: Int) = when (command) {
     0xA7 -> true
 
     0x9C -> false
-    0x4D -> true
 
     0x4A -> true
     0xBA -> true
@@ -93,7 +92,6 @@ internal fun isPatchProtocol(command: Int) = when (command) {
     0x48 -> true
     0xA8 -> true
 
-    0x4B -> true
     0xBB -> true
 
     else -> false

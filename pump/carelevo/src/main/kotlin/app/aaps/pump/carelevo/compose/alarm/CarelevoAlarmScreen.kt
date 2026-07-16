@@ -2,7 +2,7 @@ package app.aaps.pump.carelevo.compose.alarm
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,6 +24,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
@@ -31,6 +32,8 @@ import androidx.compose.ui.text.fromHtml
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import app.aaps.core.ui.R as CoreUiR
+import app.aaps.core.ui.compose.AapsSpacing
 import app.aaps.pump.carelevo.R
 
 internal data class CarelevoAlarmUiModel(
@@ -58,32 +61,35 @@ internal fun CarelevoAlarmScreen(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .clickable(enabled = false) { }
+                // Blocking modal scrim: consume all taps so nothing underneath is reachable
+                // while a critical alarm is presented.
+                .pointerInput(Unit) { detectTapGestures { } }
                 .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.5f)),
             contentAlignment = Alignment.Center
         ) {
             Card(
                 modifier = Modifier
-                    .padding(horizontal = 24.dp)
+                    .padding(horizontal = AapsSpacing.xxLarge)
                     .fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
+                shape = RoundedCornerShape(AapsSpacing.extraLarge),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
                 elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
             ) {
                 Column(
-                    modifier = Modifier.padding(24.dp),
+                    modifier = Modifier.padding(AapsSpacing.xxLarge),
                     verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Image(
-                            painter = painterResource(id = app.aaps.core.ui.R.drawable.ic_error_red_48dp),
+                            painter = painterResource(id = CoreUiR.drawable.ic_error_red_48dp),
                             contentDescription = null,
                             modifier = Modifier.size(48.dp)
                         )
                         Box(
                             modifier = Modifier
                                 .align(Alignment.BottomEnd)
-                                .size(24.dp)
+                                .size(AapsSpacing.xxLarge)
                                 .background(
                                     color = MaterialTheme.colorScheme.surface,
                                     shape = CircleShape
@@ -99,7 +105,7 @@ internal fun CarelevoAlarmScreen(
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(AapsSpacing.extraLarge))
 
                     Text(
                         text = alarm.title,
@@ -108,7 +114,7 @@ internal fun CarelevoAlarmScreen(
                         modifier = Modifier.fillMaxWidth()
                     )
 
-                    Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(AapsSpacing.extraLarge))
 
                     if (alarm.content.isNotBlank()) {
                         Text(
@@ -119,7 +125,7 @@ internal fun CarelevoAlarmScreen(
                         )
                     }
 
-                    Spacer(modifier = Modifier.height(24.dp))
+                    Spacer(modifier = Modifier.height(AapsSpacing.xxLarge))
 
                     Button(
                         onClick = onMute5MinClick,
@@ -128,7 +134,7 @@ internal fun CarelevoAlarmScreen(
                         Text(text = alarm.mute5minButtonText)
                     }
 
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(AapsSpacing.large))
 
                     Button(
                         onClick = onMuteClick,
@@ -137,7 +143,7 @@ internal fun CarelevoAlarmScreen(
                         Text(text = alarm.muteButtonText)
                     }
 
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(AapsSpacing.large))
 
                     Button(
                         onClick = onPrimaryClick,

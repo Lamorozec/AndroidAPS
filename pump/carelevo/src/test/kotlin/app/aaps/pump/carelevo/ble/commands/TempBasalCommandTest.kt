@@ -33,8 +33,8 @@ internal class TempBasalCommandTest {
     }
 
     @Test
-    fun `byUnit accepts any unit value - no range check (legacy quirk)`() {
-        // legacy DoubleToByte(0.0, 0.0) bypasses range validation, so this must NOT throw
+    fun `byUnit accepts any unit value - no range check`() {
+        // BY_UNIT has no value-range check on the wire, so this must NOT throw.
         assertThat(TempBasalCommand.byUnit(infusionUnit = 99.0, infusionHour = 0, infusionMin = 0).encode().toList())
             .containsExactly(0x23.toByte(), 99.toByte(), 0.toByte(), 0.toByte(), 0.toByte(), 0x00.toByte()).inOrder()
     }

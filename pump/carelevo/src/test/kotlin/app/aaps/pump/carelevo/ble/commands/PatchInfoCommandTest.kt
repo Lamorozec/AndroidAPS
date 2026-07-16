@@ -5,9 +5,8 @@ import org.junit.jupiter.api.Test
 import kotlin.test.assertFailsWith
 
 /**
- * Verifies [PatchInfoCommand] decodes RPT1 (0x93) + RPT2 (0x94) to the SAME fields the legacy
- * parsers produce (`CarelevoProtocolPatchInformationInquiry[Detail]ParserImpl`) — serial from bytes
- * 2..14 (ASCII), firmware from 2..5 (ASCII), model from 11..16 (decimal, byte 10 skipped).
+ * Verifies [PatchInfoCommand] decodes RPT1 (0x93) + RPT2 (0x94): serial from bytes 2..14 (ASCII),
+ * firmware from 2..5 (ASCII), model from 11..16 (decimal, byte 10 skipped).
  */
 internal class PatchInfoCommandTest {
 
@@ -52,7 +51,7 @@ internal class PatchInfoCommandTest {
 
     @Test
     fun `decode handles the real 16-byte RPT2 frame - model clamps to bytes 11 to 15`() {
-        // Real pump 0x94 frame is 16 bytes (byte 16 absent); legacy reads model bytes 11..15 only.
+        // Real pump 0x94 frame is 16 bytes (byte 16 absent); model reads bytes 11..15 only.
         val resp = PatchInfoCommand().decode(
             mapOf(
                 rpt1 to rpt1Frame("EO12507099001"),
@@ -65,7 +64,7 @@ internal class PatchInfoCommandTest {
 
     @Test
     fun `decode reads model bytes as decimal values not ascii`() {
-        // Byte value 65 (ASCII 'A') must decode to "65", proving the legacy decimal quirk is preserved.
+        // Byte value 65 (ASCII 'A') must decode to "65" — model bytes are decimal, not ASCII.
         val resp = PatchInfoCommand().decode(
             mapOf(
                 rpt1 to rpt1Frame("EO12507099001"),

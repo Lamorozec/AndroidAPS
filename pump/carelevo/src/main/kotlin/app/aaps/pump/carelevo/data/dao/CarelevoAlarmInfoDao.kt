@@ -9,9 +9,13 @@ import java.util.Optional
 interface CarelevoAlarmInfoDao {
 
     fun getAlarms(): Observable<Optional<List<CarelevoAlarmInfoEntity>>>
-    fun getAlarmsOnce(includeUnacknowledged: Boolean = true): Single<Optional<List<CarelevoAlarmInfoEntity>>>
+
+    /** One-shot read of ALL stored alarms. Everything stored is active — acknowledging removes. */
+    fun getAlarmsOnce(): Single<Optional<List<CarelevoAlarmInfoEntity>>>
     fun setAlarms(list: List<CarelevoAlarmInfoEntity>): Completable
     fun clearAlarms(): Completable
     fun upsertAlarm(entity: CarelevoAlarmInfoEntity): Completable
-    fun markAcknowledged(alarmId: String, acknowledged: Boolean, updatedAt: String): Completable
+
+    /** Remove one alarm from the store (= acknowledge; there is no acknowledged-alarm history). */
+    fun removeAlarm(alarmId: String): Completable
 }

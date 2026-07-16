@@ -33,13 +33,13 @@ internal class CarelevoAlarmInfoUseCaseTest {
     }
 
     @Test
-    fun getAlarmsOnce_passes_includeUnacknowledged_flag() {
-        whenever(repository.getAlarmsOnce(true)).thenReturn(Single.just(Optional.of(emptyList())))
+    fun getAlarmsOnce_delegates_to_repository() {
+        whenever(repository.getAlarmsOnce()).thenReturn(Single.just(Optional.of(emptyList())))
 
-        val result = sut.getAlarmsOnce(includeUnacknowledged = true).blockingGet()
+        val result = sut.getAlarmsOnce().blockingGet()
 
         assertThat(result.isPresent).isTrue()
-        verify(repository).getAlarmsOnce(true)
+        verify(repository).getAlarmsOnce()
     }
 
     @Test
@@ -53,12 +53,12 @@ internal class CarelevoAlarmInfoUseCaseTest {
     }
 
     @Test
-    fun acknowledgeAlarm_marks_alarm_as_acknowledged() {
-        whenever(repository.markAcknowledged(any(), any(), any())).thenReturn(Completable.complete())
+    fun acknowledgeAlarm_removes_alarm_from_store() {
+        whenever(repository.removeAlarm(any())).thenReturn(Completable.complete())
 
         sut.acknowledgeAlarm("alarm-1").blockingAwait()
 
-        verify(repository).markAcknowledged(eq("alarm-1"), eq(true), any())
+        verify(repository).removeAlarm(eq("alarm-1"))
     }
 
     @Test

@@ -9,11 +9,10 @@ import app.aaps.pump.carelevo.ble.BleResponse
  * - [TYPE_LOW_INSULIN] (0): low-insulin reminder amount (value range 20..50 U)
  * - [TYPE_EXPIRY] (1): patch-expiry reminder hours (value range 24..167)
  *
- * Request wire format (3 bytes): `[0] 0x15, [1] thresholdType, [2] value` (matches
- * `setThresholdNotice(value, type)`).
+ * Request wire format (3 bytes): `[0] 0x15, [1] thresholdType, [2] value`.
  *
- * Response (0x75): `[0] 0x75, [1] thresholdType` — the legacy parser **fabricates `result = 0`** (it is
- * NOT on the wire), so arrival of the frame is the success signal. Reproduced here for parity.
+ * Response (0x75): `[0] 0x75, [1] thresholdType` — no result code is carried on the wire, so arrival of
+ * the frame is the success signal; [resultCode] is always reported as 0.
  */
 class NoticeThresholdCommand(
     private val thresholdType: Int,
@@ -48,7 +47,7 @@ class NoticeThresholdCommand(
         private val LOW_INSULIN_RANGE = 20..50
         private val EXPIRY_RANGE = 24..167
         private const val MIN_RESPONSE_LENGTH = 2
-        private const val FABRICATED_RESULT = 0 // legacy parser hardcodes result = 0 (not on the wire)
+        private const val FABRICATED_RESULT = 0 // no result code on the wire; frame arrival = success
     }
 }
 

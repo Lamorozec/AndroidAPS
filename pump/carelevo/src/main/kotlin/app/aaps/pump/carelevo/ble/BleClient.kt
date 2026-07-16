@@ -43,7 +43,7 @@ interface BleClient {
      * notification (alarm, status push) falls through to [unsolicitedEvents].
      *
      * Same deadline policy as [request] — no built-in timeout, wrap in `withTimeout(...)`.
-     * A single deadline around the whole call replaces the legacy per-response timeouts.
+     * A single deadline wraps the whole call (not per-response).
      *
      * Throws [BleDisconnectedException] / [app.aaps.pump.carelevo.ble.gatt.GattWriteException] /
      * [kotlinx.coroutines.CancellationException] on the same conditions as [request].

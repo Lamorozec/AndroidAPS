@@ -23,12 +23,9 @@ import kotlin.test.assertFailsWith
 
 /**
  * Tests [CarelevoBleSession.runPairing] against a scripted fake pump — including the **set-time retry
- * round** the legacy stack could never test: `CarelevoConnectNewPatchUseCaseTest.
- * execute_retries_round_when_serial_is_empty` is `@Disabled` because the legacy path funnels every round
- * through one shared `PublishSubject`, so a mock's round-1 events replay into round 2. The new stack
- * registers a FRESH waiter per `requestMultiple` round, so the scenario is scriptable: round 1 answers
- * with an empty serial, round 2 with a valid one, and the retry is observable on the wire (two 0x11
- * writes).
+ * round**: each `requestMultiple` round registers a fresh waiter, so rounds stay isolated and the
+ * scenario is scriptable — round 1 answers with an empty serial, round 2 with a valid one, and the
+ * retry is observable on the wire (two 0x11 writes).
  *
  * Uses `runTest` virtual time with the session's `sessionDispatcher` test seam — the events SharedFlow
  * has no replay, so with real dispatchers an instantly-scripted response can be emitted before the
@@ -77,7 +74,7 @@ internal class CarelevoBleSessionPairingTest {
         assertThat(result.serialNumber).isEqualTo(SERIAL)
         assertThat(result.firmwareVersion).isEqualTo("T168")
         assertThat(result.modelName).isEqualTo("6776514848")
-        // Colon MAC built from the 0x9B response bytes, lowercase (legacy convertBytesToHex parity).
+        // Colon MAC built from the 0x9B response bytes, lowercase.
         assertThat(result.address).isEqualTo("94:b2:16:1d:2f:6d")
 
         // The auth write must carry checkSumV2(key) over (MAC bytes + checksum byte), seeded with the
@@ -97,7 +94,7 @@ internal class CarelevoBleSessionPairingTest {
 
         assertThat(transport.writes.count { it[0] == SET_TIME_OPCODE }).isEqualTo(1)
         assertThat(result.serialNumber).isEqualTo(SERIAL)
-        // Full activation sequence on ONE session, in legacy order.
+        // Full activation sequence on ONE session, in protocol order.
         assertThat(transport.writes.map { it[0] }).isEqualTo(
             listOf(MAC_REQUEST_OPCODE, APP_AUTH_OPCODE, SET_TIME_OPCODE, ALERT_ALARM_OPCODE, THRESHOLD_OPCODE)
         )

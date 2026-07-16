@@ -7,18 +7,14 @@ import app.aaps.pump.carelevo.ble.BleResponse
  * `CMD_EXTEND_BOLUS_CANCEL_REQ` (0x29) → `CMD_EXTEND_BOLUS_CANCEL_RES` (0x89). Cancels a running
  * extended-bolus infusion program. High criticality (delivery-affecting). Single-response [BleCommand].
  *
- * Request wire format (1 byte): `[0] 0x29` — legacy `manipulateCancelExtendBolusInfusionProgram` sends
- * `createMessage(byteArrayOf(CMD_EXTEND_BOLUS_CANCEL_REQ))` with no arguments.
+ * Request wire format (1 byte): `[0] 0x29` — opcode only, no arguments.
  *
- * Response wire format (4 bytes, matches `CarelevoProtocolExtendBolusInfusionCancelParserImpl`):
+ * Response wire format (4 bytes):
  * ```
  * [0]     0x89           opcode
- * [1]     resultCode     0 = SUCCESS in the legacy Result taxonomy
+ * [1]     resultCode     0 = SUCCESS
  * [2..3]  infusedAmount  = [2] + [3]/100.0   (U already delivered before the cancel)
  * ```
- * The legacy parser also fabricates a `timestamp = System.currentTimeMillis()` and echoes `command`
- * (= the opcode). Neither is on the wire, so — matching the other ported commands — this decoder omits
- * both; the wall-clock timestamp belongs to the state-apply layer, not the wire decode.
  */
 class ExtendBolusCancelCommand : BleCommand<ExtendBolusCancelResponse> {
 

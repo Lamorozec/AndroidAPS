@@ -53,6 +53,10 @@ class CarelevoTempBasalCoordinator @Inject constructor(
             LTag.PUMPCOMM,
             "setTempBasalAbsolute.start absoluteRate=${absoluteRate.toFloat()} durationInMinutes=${durationInMinutes.toLong()}"
         )
+        // Fail-fast guards (same style as deliverTreatment): a zero/negative duration or rate would
+        // otherwise be silently mangled into wire bytes.
+        require(absoluteRate >= 0.0) { "TBR absolute rate must be >= 0, got $absoluteRate" }
+        require(durationInMinutes > 0) { "TBR duration must be > 0 min, got $durationInMinutes" }
         val result = pumpEnactResultProvider.get()
         if (!carelevoPatch.isBluetoothEnabled()) {
             aapsLogger.info(LTag.PUMPCOMM, "setTempBasalAbsolute.skip reason=bluetoothDisabled")
@@ -65,11 +69,15 @@ class CarelevoTempBasalCoordinator @Inject constructor(
         return try {
             val response = runBlocking { bleSession.runSingle(address, TempBasalCommand.byUnit(absoluteRate, hour, min)) }
             val success = response.resultCode == RESULT_SUCCESS
+            // Pump-is-authoritative: once the patch ACKs, the TBR IS running — it must reach pumpSync
+            // even if the local persist fails, or basal IOB modeling silently diverges from reality
+            // for the whole TBR duration.
             val persisted = success && startTempBasalInfusionUseCase.persistTempBasalStarted(
                 StartTempBasalInfusionRequestModel(isUnit = true, speed = absoluteRate, minutes = durationInMinutes)
             )
             aapsLogger.info(LTag.PUMPCOMM, "newBle.setTempBasalAbsolute rate=$absoluteRate result=${response.resultCode} persisted=$persisted")
-            if (success && persisted) {
+            if (success && !persisted) aapsLogger.error(LTag.PUMPCOMM, "newBle.setTempBasalAbsolute persist failed — pump enacted, recording in pumpSync anyway")
+            if (success) {
                 onLastDataUpdated()
                 runBlocking {
                     pumpSync.syncTemporaryBasalWithPumpId(
@@ -108,6 +116,8 @@ class CarelevoTempBasalCoordinator @Inject constructor(
         serialNumber: String,
         onLastDataUpdated: () -> Unit
     ): PumpEnactResult {
+        require(percent >= 0) { "TBR percent must be >= 0, got $percent" }
+        require(durationInMinutes > 0) { "TBR duration must be > 0 min, got $durationInMinutes" }
         val result = pumpEnactResultProvider.get()
         aapsLogger.debug(LTag.PUMPCOMM, "setTempBasalPercent.start percent=$percent durationInMinutes=$durationInMinutes")
         if (!carelevoPatch.isBluetoothEnabled()) {
@@ -121,11 +131,13 @@ class CarelevoTempBasalCoordinator @Inject constructor(
         return try {
             val response = runBlocking { bleSession.runSingle(address, TempBasalCommand.byPercent(percent, hour, min)) }
             val success = response.resultCode == RESULT_SUCCESS
+            // Pump-is-authoritative — see setTempBasalAbsolute.
             val persisted = success && startTempBasalInfusionUseCase.persistTempBasalStarted(
                 StartTempBasalInfusionRequestModel(isUnit = false, percent = percent, minutes = durationInMinutes)
             )
             aapsLogger.info(LTag.PUMPCOMM, "newBle.setTempBasalPercent percent=$percent result=${response.resultCode} persisted=$persisted")
-            if (success && persisted) {
+            if (success && !persisted) aapsLogger.error(LTag.PUMPCOMM, "newBle.setTempBasalPercent persist failed — pump enacted, recording in pumpSync anyway")
+            if (success) {
                 onLastDataUpdated()
                 runBlocking {
                     pumpSync.syncTemporaryBasalWithPumpId(
@@ -157,8 +169,8 @@ class CarelevoTempBasalCoordinator @Inject constructor(
 
     /**
      * Cancel a running temp basal. Discrete `TempBasalCancelCommand` (0x2D→0x8D) on the session →
-     * delete + recompute-mode persist → `pumpSync.syncStop…`. The legacy 2 s `delaySubscription` is
-     * dropped (the session's own settle covers it).
+     * delete + recompute-mode persist → `pumpSync.syncStop…`. The session's own settle provides the
+     * inter-op spacing.
      */
     fun cancelTempBasal(
         serialNumber: String,
@@ -175,9 +187,12 @@ class CarelevoTempBasalCoordinator @Inject constructor(
         return try {
             val response = runBlocking { bleSession.runSingle(address, TempBasalCancelCommand()) }
             val success = response.resultCode == RESULT_SUCCESS
+            // Pump-is-authoritative — on ACK the TBR IS stopped on the patch; the stop must reach
+            // pumpSync even if the local persist fails.
             val persisted = success && cancelTempBasalInfusionUseCase.persistTempBasalCancelled()
             aapsLogger.info(LTag.PUMPCOMM, "newBle.cancelTempBasal result=${response.resultCode} persisted=$persisted")
-            if (success && persisted) {
+            if (success && !persisted) aapsLogger.error(LTag.PUMPCOMM, "newBle.cancelTempBasal persist failed — pump stopped, recording stop in pumpSync anyway")
+            if (success) {
                 onLastDataUpdated()
                 runBlocking {
                     pumpSync.syncStopTemporaryBasalWithPumpId(

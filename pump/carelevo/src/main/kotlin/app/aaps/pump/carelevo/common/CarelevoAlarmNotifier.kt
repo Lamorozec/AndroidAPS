@@ -11,7 +11,6 @@ import androidx.core.app.NotificationCompat
 import androidx.core.text.HtmlCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
-import app.aaps.core.data.time.T
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
 import app.aaps.core.interfaces.notifications.NotificationAction
@@ -22,8 +21,10 @@ import app.aaps.core.interfaces.sharedPreferences.SP
 import app.aaps.core.interfaces.utils.DateUtil
 import app.aaps.pump.carelevo.R
 import app.aaps.pump.carelevo.common.keys.CarelevoIntPreferenceKey
+import app.aaps.core.ui.R as CoreUiR
 import app.aaps.pump.carelevo.domain.model.alarm.CarelevoAlarmInfo
 import app.aaps.pump.carelevo.domain.type.AlarmCause
+import app.aaps.pump.carelevo.domain.type.AlarmType.Companion.isCritical
 import app.aaps.pump.carelevo.ext.transformNotificationStringResources
 import app.aaps.pump.carelevo.presentation.model.AlarmEvent
 import io.reactivex.rxjava3.disposables.CompositeDisposable
@@ -33,6 +34,15 @@ import kotlinx.coroutines.flow.asStateFlow
 import javax.inject.Inject
 import javax.inject.Singleton
 
+/**
+ * Presentation half of the alarm pipeline: observes the persisted active-alarm set (via
+ * [CarelevoAlarmActionHandler]) and surfaces it — the in-app AAPS "top notification" cards
+ * ([showTopNotification], with the clear action wired back to the shared state machine), the
+ * system-tray notification for backgrounded users ([showNotification]), and the [alarms] StateFlow
+ * the Compose alarm host renders from. The plugin (`CarelevoPumpPlugin.handleAlarms`) decides per
+ * emission which surface a given alarm set takes; [alarmHostActive] tells it whether the in-app
+ * host is mounted.
+ */
 @Singleton
 class CarelevoAlarmNotifier @Inject constructor(
     private val context: Context,
@@ -50,6 +60,14 @@ class CarelevoAlarmNotifier @Inject constructor(
     private var onAlarmsUpdated: ((List<CarelevoAlarmInfo>) -> Unit)? = null
     private val channelId = "carelevo_alarm_channel"
 
+    /**
+     * True while the in-app Compose alarm host ([app.aaps.pump.carelevo.compose.alarm.CarelevoAlarmHost])
+     * is mounted (user is on the Carelevo screen). The plugin uses this to decide whether a critical
+     * alarm is already being presented (host shows the full-screen alarm + sound) or must fall back
+     * to the global `UiInteraction.runAlarm` so a backgrounded/elsewhere user is never left silent.
+     */
+    @Volatile var alarmHostActive: Boolean = false
+
     fun startObserving(
         onAlarmsUpdated: (List<CarelevoAlarmInfo>) -> Unit
     ) {
@@ -65,8 +83,8 @@ class CarelevoAlarmNotifier @Inject constructor(
             )
     }
 
-    fun refreshAlarms(includeUnacknowledged: Boolean = false) {
-        disposables += alarmActionHandler.getAlarmsOnce(includeUnacknowledged)
+    fun refreshAlarms() {
+        disposables += alarmActionHandler.getAlarmsOnce()
             .subscribeOn(aapsSchedulers.io)
             .observeOn(aapsSchedulers.main)
             .subscribe(
@@ -99,18 +117,22 @@ class CarelevoAlarmNotifier @Inject constructor(
             val descArgs = buildDescArgsFor(newAlarm)
             val desc = buildDescription(descRes, descArgs)
             aapsLogger.debug(LTag.PUMPCOMM, "showTopNotification titleRes=$titleRes descArgs=$descArgs desc=$desc")
+            // Critical tiers get the id's declared URGENT level + alarm sound (the shared
+            // NotificationManagerImpl gates its ramping alarm on URGENT && soundRes != null) and do
+            // not auto-expire — an unhandled critical alarm must not disappear on its own.
+            // Non-critical notices stay NORMAL/silent and also persist until handled.
+            val critical = newAlarm.alarmType.isCritical()
             notificationManager.post(
                 id = NotificationId.CARELEVO_PATCH_ALERT,
                 text = context.getString(titleRes) + "\n" + HtmlCompat.fromHtml(desc, HtmlCompat.FROM_HTML_MODE_LEGACY),
-                level = NotificationLevel.NORMAL,
+                level = if (critical) NotificationLevel.URGENT else NotificationLevel.NORMAL,
                 actions = listOf(
                     NotificationAction(btnRes) {
                         alarmActionHandler.triggerEvent(AlarmEvent.ClearAlarm(info = newAlarm))
                     }
                 ),
                 date = dateUtil.now(),
-                validTo = dateUtil.now() + T.mins(1).msecs(),
-                soundRes = null,
+                soundRes = if (critical) CoreUiR.raw.error else null,
                 validityCheck = null,
             )
         }
@@ -222,8 +244,10 @@ class CarelevoAlarmNotifier @Inject constructor(
     }
 
     private fun createNotificationChannel() {
-        val name = "Carelevo Alarm Channel"
-        val descriptionText = "케어레보 패치 알람 알림 채널"
+        // Resource strings — the channel name/description are user-visible in the system's
+        // notification settings.
+        val name = context.getString(R.string.carelevo_alarm_channel_name)
+        val descriptionText = context.getString(R.string.carelevo_alarm_channel_description)
         val importance = NotificationManager.IMPORTANCE_HIGH
         val channel = NotificationChannel(channelId, name, importance).apply {
             description = descriptionText

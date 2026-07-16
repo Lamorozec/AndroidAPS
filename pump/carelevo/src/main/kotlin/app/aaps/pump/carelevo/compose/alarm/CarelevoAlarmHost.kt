@@ -2,10 +2,13 @@ package app.aaps.pump.carelevo.compose.alarm
 
 import android.app.Activity
 import android.bluetooth.BluetoothAdapter
+import android.content.Context
 import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -18,7 +21,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
 import app.aaps.core.interfaces.ui.IconsProvider
-import app.aaps.core.ui.compose.LocalSnackbarHostState
+import app.aaps.core.ui.R as CoreUiR
 import app.aaps.pump.carelevo.R
 import app.aaps.pump.carelevo.common.CarelevoAlarmNotifier
 import app.aaps.pump.carelevo.domain.model.alarm.CarelevoAlarmInfo
@@ -32,10 +35,10 @@ import app.aaps.pump.carelevo.presentation.viewmodel.CarelevoAlarmViewModel
 internal fun CarelevoAlarmHost(
     aapsLogger: AAPSLogger,
     carelevoAlarmNotifier: CarelevoAlarmNotifier,
-    iconsProvider: IconsProvider
+    iconsProvider: IconsProvider,
+    snackbarHostState: SnackbarHostState
 ) {
     val context = LocalContext.current
-    val snackbarHostState = LocalSnackbarHostState.current
     val viewModel: CarelevoAlarmViewModel = hiltViewModel()
     val notifierAlarms = carelevoAlarmNotifier.alarms.collectAsStateWithLifecycle().value
     val alarmQueue = viewModel.alarmQueue.collectAsStateWithLifecycle().value
@@ -52,10 +55,17 @@ internal fun CarelevoAlarmHost(
         }
     }
 
+    // Register as the active in-app alarm surface: while mounted, the plugin suppresses its global
+    // runAlarm fallback (this host presents the rich alarm screen and starts the sound itself).
+    DisposableEffect(Unit) {
+        carelevoAlarmNotifier.alarmHostActive = true
+        onDispose { carelevoAlarmNotifier.alarmHostActive = false }
+    }
+
     LaunchedEffect(notifierAlarms) {
-        if (notifierAlarms.any { it.alarmType.isCritical() || it.cause == AlarmCause.ALARM_ALERT_BLUETOOTH_OFF }) {
+        if (notifierAlarms.any { it.alarmType.isCritical() }) {
             aapsLogger.debug(LTag.PUMPCOMM, "load alarms from notifier alarms=$notifierAlarms")
-            viewModel.loadUnacknowledgedAlarms()
+            viewModel.loadActiveAlarms()
         }
     }
 
@@ -85,6 +95,8 @@ internal fun CarelevoAlarmHost(
 
     LaunchedEffect(currentAlarm?.alarmId) {
         if (currentAlarm != null) {
+            // Hand the presented alarm to the VM first so the alarm dialog carries its title.
+            viewModel.alarmInfo = currentAlarm
             viewModel.triggerEvent(AlarmEvent.StartAlarm)
         }
     }
@@ -113,7 +125,7 @@ internal fun CarelevoAlarmHost(
 }
 
 private fun buildAlarmUiModel(
-    context: android.content.Context,
+    context: Context,
     iconsProvider: IconsProvider,
     alarm: CarelevoAlarmInfo
 ): CarelevoAlarmUiModel {
@@ -128,12 +140,12 @@ private fun buildAlarmUiModel(
         title = context.getString(titleRes),
         content = desc,
         primaryButtonText = context.getString(btnRes),
-        muteButtonText = context.getString(app.aaps.core.ui.R.string.mute),
-        mute5minButtonText = context.getString(app.aaps.core.ui.R.string.mute5min)
+        muteButtonText = context.getString(CoreUiR.string.mute),
+        mute5minButtonText = context.getString(CoreUiR.string.mute5min)
     )
 }
 
-private fun buildDescArgsFor(context: android.content.Context, alarm: CarelevoAlarmInfo): List<String> = when (alarm.cause) {
+private fun buildDescArgsFor(context: Context, alarm: CarelevoAlarmInfo): List<String> = when (alarm.cause) {
     AlarmCause.ALARM_NOTICE_LOW_INSULIN,
     AlarmCause.ALARM_ALERT_OUT_OF_INSULIN -> {
         listOf((alarm.value ?: 0).toString())

@@ -54,7 +54,7 @@ internal class CarelevoConnectNewPatchUseCaseTest {
             assertThat(thresholdExpiry).isEqualTo(120)
             assertThat(thresholdMaxBasalSpeed).isEqualTo(15.0)
             assertThat(thresholdMaxBolusDose).isEqualTo(25.0)
-            // Fabricated from the phone clock as yyMMddHHmm (legacy RPT2-parser parity) and parseable back.
+            // Fabricated from the phone clock as yyMMddHHmm and parseable back.
             assertThat(bootDateTime).hasLength(10)
             assertThat(bootDateTimeUtcMillis).isNotNull()
         }

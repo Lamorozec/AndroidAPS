@@ -1,5 +1,6 @@
 package app.aaps.pump.carelevo.domain.usecase.bolus
 
+import app.aaps.pump.carelevo.domain.model.infusion.derivePatchMode
 import app.aaps.pump.carelevo.domain.repository.CarelevoInfusionInfoRepository
 import app.aaps.pump.carelevo.domain.repository.CarelevoPatchInfoRepository
 import org.joda.time.DateTime
@@ -22,17 +23,8 @@ class CarelevoCancelImmeBolusInfusionUseCase @Inject constructor(
         val infusionInfo = infusionInfoRepository.getInfusionInfoBySync()
             ?: throw NullPointerException("infusion info must be not null")
 
-        val mode = if (infusionInfo.extendBolusInfusionInfo != null) {
-            5
-        } else if (infusionInfo.immeBolusInfusionInfo != null) {
-            3
-        } else if (infusionInfo.tempBasalInfusionInfo != null) {
-            2
-        } else if (infusionInfo.basalInfusionInfo != null) {
-            if (infusionInfo.basalInfusionInfo.isStop) 0 else 1
-        } else {
-            throw NullPointerException("infusion info must be not null")
-        }
+        val mode = infusionInfo.derivePatchMode()
+            ?: throw NullPointerException("infusion info must be not null")
 
         val patchInfo = patchInfoRepository.getPatchInfoBySync()
             ?: throw NullPointerException("patch info must be not null")
