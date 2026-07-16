@@ -169,7 +169,11 @@ class CarelevoPatchConnectionFlowViewModel @Inject constructor(
 
     /** Advance to whatever step actually follows [current] in this run's step list. */
     private fun goToNextStep(current: CarelevoPatchStep) {
-        val next = workflowSteps.getOrNull(workflowSteps.indexOf(current) + 1) ?: return
+        // A step that is not part of this run has index -1; without the guard the +1 would
+        // resolve to the first step and silently rewind the wizard.
+        val currentIndex = workflowSteps.indexOf(current)
+        if (currentIndex < 0) return
+        val next = workflowSteps.getOrNull(currentIndex + 1) ?: return
         setPage(next)
     }
 

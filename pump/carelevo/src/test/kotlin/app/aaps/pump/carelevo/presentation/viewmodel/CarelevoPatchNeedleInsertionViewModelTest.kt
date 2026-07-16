@@ -255,6 +255,18 @@ class CarelevoPatchNeedleInsertionViewModelTest {
     }
 
     @Test
+    fun `triggerEvent forwards the not-connected message to the event flow`() = runTest(testDispatcher.scheduler) {
+        // ShowMessageCarelevoIsNotConnected has its own generateEventType branch but no VM caller;
+        // it is only reachable through triggerEvent from the step composable.
+        val events = collectEvents()
+
+        sut.triggerEvent(CarelevoConnectNeedleEvent.ShowMessageCarelevoIsNotConnected)
+        advanceUntilIdle()
+
+        assertThat(events).containsExactly(CarelevoConnectNeedleEvent.ShowMessageCarelevoIsNotConnected)
+    }
+
+    @Test
     fun `triggerEvent ignores an event from another hierarchy`() = runTest(testDispatcher.scheduler) {
         val events = collectEvents()
 
@@ -284,6 +296,51 @@ class CarelevoPatchNeedleInsertionViewModelTest {
 
         patchInfoSubject.onNext(Optional.of(patchInfo(checkNeedle = false, needleFailedCount = 0)))
         assertThat(sut.isNeedleInsert.value).isFalse()
+    }
+
+    @Test
+    fun `observePatchInfo keeps the first insert timestamp across repeated inserted reports`() {
+        // The patch re-reports checkNeedle=true on every poll; the insert instant must be latched on
+        // the first one (`if (needleInsertedAtMs == null)`) so the needle-to-basal delay is measured
+        // from the real insertion, not from the latest poll.
+        sut.observePatchInfo()
+        givenReadyToSetBasal()
+
+        patchInfoSubject.onNext(Optional.of(patchInfo(checkNeedle = true, needleFailedCount = 0)))
+        patchInfoSubject.onNext(Optional.of(patchInfo(checkNeedle = true, needleFailedCount = 0)))
+
+        sut.startSetBasal()
+        testDispatcher.scheduler.runCurrent()
+
+        // Still inside the latched delay window -> parked, not programmed.
+        assertThat(sut.isNeedleInsert.value).isTrue()
+        assertThat(sut.uiState.value).isEqualTo(UiState.Loading)
+        verifyBlocking(commandQueue, never()) { customCommand(any()) }
+    }
+
+    @Test
+    fun `observePatchInfo withdrawal cancels a parked delayed basal job`() {
+        // Park a delayed startSetBasal, then report the needle withdrawn. The withdrawal clears the
+        // insert instant AND cancels the job; if it only cleared the instant, the still-armed job
+        // would fire below and program the basal against a withdrawn needle.
+        givenReadyToSetBasal()
+        val ok = enactResult(true)
+        whenever { commandQueue.customCommand(any()) }.thenReturn(ok)
+        sut.observePatchInfo()
+        patchInfoSubject.onNext(Optional.of(patchInfo(checkNeedle = true, needleFailedCount = 0)))
+
+        sut.startSetBasal()
+        testDispatcher.scheduler.runCurrent()
+        assertThat(sut.uiState.value).isEqualTo(UiState.Loading)
+
+        patchInfoSubject.onNext(Optional.of(patchInfo(checkNeedle = false, needleFailedCount = 0)))
+        // Advance past NEEDLE_TO_BASAL_DELAY_MS by a bounded amount: a cancelled job never fires, an
+        // armed one would re-enter startSetBasal with a null insert instant and reach the queue.
+        testDispatcher.scheduler.advanceTimeBy(11_000L)
+        testDispatcher.scheduler.runCurrent()
+
+        assertThat(sut.isNeedleInsert.value).isFalse()
+        verifyBlocking(commandQueue, never()) { customCommand(any()) }
     }
 
     @Test
@@ -446,6 +503,30 @@ class CarelevoPatchNeedleInsertionViewModelTest {
         verify(carelevoPatch, never()).isBluetoothEnabled()
         verifyBlocking(commandQueue, never()) { customCommand(any()) }
     }
+
+    @Test
+    fun `startSetBasal runs immediately once the needle has been withdrawn`() =
+        runTest(testDispatcher.scheduler) {
+            // Insert then withdraw clears the insert instant, so the needle-to-basal delay guard is
+            // skipped entirely and the basal is programmed on the spot (no parked job).
+            sut.observePatchInfo()
+            patchInfoSubject.onNext(Optional.of(patchInfo(checkNeedle = true, needleFailedCount = 0)))
+            patchInfoSubject.onNext(Optional.of(patchInfo(checkNeedle = false, needleFailedCount = 0)))
+            givenReadyToSetBasal()
+            val ok = enactResult(true)
+            whenever { commandQueue.customCommand(any()) }.thenReturn(ok)
+            whenever {
+                pumpSync.insertTherapyEventIfNewWithTimestamp(any(), any(), anyOrNull(), anyOrNull(), any(), any())
+            }.thenReturn(true)
+            val events = collectEvents()
+
+            sut.startSetBasal()
+            advanceUntilIdle()
+
+            verifyBlocking(commandQueue) { customCommand(any<CmdSetBasal>()) }
+            assertThat(events).containsExactly(CarelevoConnectNeedleEvent.SetBasalComplete)
+            assertThat(sut.uiState.value).isEqualTo(UiState.Idle)
+        }
 
     // ---- startSetBasal: success bookkeeping ---------------------------------------------------
 
@@ -748,4 +829,53 @@ class CarelevoPatchNeedleInsertionViewModelTest {
             assertThat(sut.uiState.value).isEqualTo(UiState.Idle)
             verify(carelevoPatch, never()).discardTeardown()
         }
+
+    // ---- onCleared ----------------------------------------------------------------------------
+
+    /** onCleared is protected on ViewModel and the VM is final, so drive it reflectively. */
+    private fun clearViewModel() {
+        val onCleared = sut.javaClass.getDeclaredMethod("onCleared")
+        onCleared.isAccessible = true
+        onCleared.invoke(sut)
+    }
+
+    @Test
+    fun `onCleared disposes the patch-info subscription so later emissions are ignored`() {
+        sut.observePatchInfo()
+        patchInfoSubject.onNext(Optional.of(patchInfo(checkNeedle = true, needleFailedCount = 0)))
+        assertThat(sut.isNeedleInsert.value).isTrue()
+
+        clearViewModel()
+        patchInfoSubject.onNext(Optional.of(patchInfo(checkNeedle = false, needleFailedCount = 0)))
+
+        // Subscription disposed on teardown -> the withdrawal never reaches the flow.
+        assertThat(sut.isNeedleInsert.value).isTrue()
+    }
+
+    @Test
+    fun `onCleared does not alarm on a post-teardown needle failure`() {
+        sut.observePatchInfo()
+
+        clearViewModel()
+        patchInfoSubject.onNext(Optional.of(patchInfo(checkNeedle = false, needleFailedCount = 3)))
+
+        verify(carelevoAlarmInfoUseCase, never()).upsertAlarm(any())
+    }
+
+    @Test
+    fun `onCleared tears down a parked delayed basal job without throwing`() {
+        // Coverage of the delayedStartBasalJob.cancel() line. Deliberately no queue assertion: the
+        // delay guard reads the wall clock, which the virtual scheduler cannot advance, so an
+        // un-cancelled job would merely re-park — the cancel is not observable through the queue.
+        givenReadyToSetBasal()
+        sut.observePatchInfo()
+        patchInfoSubject.onNext(Optional.of(patchInfo(checkNeedle = true, needleFailedCount = 0)))
+        sut.startSetBasal()
+        testDispatcher.scheduler.runCurrent()
+        assertThat(sut.uiState.value).isEqualTo(UiState.Loading)
+
+        clearViewModel()
+
+        verifyBlocking(commandQueue, never()) { customCommand(any()) }
+    }
 }

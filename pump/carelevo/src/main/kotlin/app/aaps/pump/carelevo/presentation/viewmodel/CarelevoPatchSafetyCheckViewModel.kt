@@ -186,32 +186,32 @@ class CarelevoPatchSafetyCheckViewModel @Inject constructor(
             .timeout(3000L, TimeUnit.MILLISECONDS)
             .subscribeOn(aapsSchedulers.io)
             .observeOn(aapsSchedulers.main)
-            .doOnError {
-                aapsLogger.error(LTag.PUMPCOMM, "doOnError called : $it")
-                setUiState(UiState.Idle)
-                triggerEvent(CarelevoConnectSafetyCheckEvent.DiscardFailed)
-            }.subscribe { response ->
-                when (response) {
-                    is ResponseResult.Success -> {
-                        aapsLogger.debug(LTag.PUMPCOMM, "response success")
-                        carelevoPatch.discardTeardown()
-                        setUiState(UiState.Idle)
-                        triggerEvent(CarelevoConnectSafetyCheckEvent.DiscardComplete)
-                    }
+            .subscribe({ response ->
+                           when (response) {
+                               is ResponseResult.Success -> {
+                                   aapsLogger.debug(LTag.PUMPCOMM, "response success")
+                                   carelevoPatch.discardTeardown()
+                                   setUiState(UiState.Idle)
+                                   triggerEvent(CarelevoConnectSafetyCheckEvent.DiscardComplete)
+                               }
 
-                    is ResponseResult.Error   -> {
-                        aapsLogger.error(LTag.PUMPCOMM, "response error : ${response.e}")
-                        setUiState(UiState.Idle)
-                        triggerEvent(CarelevoConnectSafetyCheckEvent.DiscardFailed)
-                    }
+                               is ResponseResult.Error   -> {
+                                   aapsLogger.error(LTag.PUMPCOMM, "response error : ${response.e}")
+                                   setUiState(UiState.Idle)
+                                   triggerEvent(CarelevoConnectSafetyCheckEvent.DiscardFailed)
+                               }
 
-                    else                      -> {
-                        aapsLogger.error(LTag.PUMPCOMM, "response failed")
-                        setUiState(UiState.Idle)
-                        triggerEvent(CarelevoConnectSafetyCheckEvent.DiscardFailed)
-                    }
-                }
-            }
+                               else                      -> {
+                                   aapsLogger.error(LTag.PUMPCOMM, "response failed")
+                                   setUiState(UiState.Idle)
+                                   triggerEvent(CarelevoConnectSafetyCheckEvent.DiscardFailed)
+                               }
+                           }
+                       }, { e ->
+                           aapsLogger.error(LTag.PUMPCOMM, "force discard failed : $e")
+                           setUiState(UiState.Idle)
+                           triggerEvent(CarelevoConnectSafetyCheckEvent.DiscardFailed)
+                       })
     }
 
     fun retryAdditionalPriming() {

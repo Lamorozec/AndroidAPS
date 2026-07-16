@@ -12,6 +12,8 @@ import app.aaps.pump.carelevo.ble.CarelevoBleSession
 import app.aaps.pump.carelevo.ble.CarelevoBleTransport
 import app.aaps.pump.carelevo.command.CmdDiscard
 import app.aaps.pump.carelevo.common.CarelevoPatch
+import app.aaps.pump.carelevo.common.keys.CarelevoBooleanPreferenceKey
+import app.aaps.pump.carelevo.common.keys.CarelevoIntPreferenceKey
 import app.aaps.pump.carelevo.common.model.Event
 import app.aaps.pump.carelevo.common.model.PatchState
 import app.aaps.pump.carelevo.common.model.UiState
@@ -20,13 +22,16 @@ import app.aaps.pump.carelevo.domain.model.result.ResultSuccess
 import app.aaps.pump.carelevo.domain.model.userSetting.CarelevoUserSettingInfoDomainModel
 import app.aaps.pump.carelevo.domain.usecase.patch.CarelevoConnectNewPatchUseCase
 import app.aaps.pump.carelevo.domain.usecase.patch.CarelevoPatchForceDiscardUseCase
+import app.aaps.pump.carelevo.domain.usecase.patch.model.CarelevoConnectNewPatchRequestModel
 import app.aaps.pump.carelevo.presentation.model.CarelevoConnectPrepareEvent
 import app.aaps.pump.carelevo.presentation.model.CarelevoOverviewEvent
 import com.google.common.truth.Truth.assertThat
 import io.reactivex.rxjava3.core.Single
+import io.reactivex.rxjava3.disposables.CompositeDisposable
 import io.reactivex.rxjava3.plugins.RxJavaPlugins
 import io.reactivex.rxjava3.schedulers.Schedulers
 import io.reactivex.rxjava3.subjects.BehaviorSubject
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -44,6 +49,8 @@ import org.mockito.Mock
 import org.mockito.junit.jupiter.MockitoExtension
 import org.mockito.junit.jupiter.MockitoSettings
 import org.mockito.kotlin.any
+import org.mockito.kotlin.argumentCaptor
+import org.mockito.kotlin.eq
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.never
 import org.mockito.kotlin.verify
@@ -52,6 +59,8 @@ import org.mockito.kotlin.whenever
 import org.mockito.quality.Strictness
 import java.util.Optional
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * Unit tests for [CarelevoPatchConnectViewModel] — the activation wizard's scan/pair/discard step.
@@ -180,6 +189,20 @@ internal class CarelevoPatchConnectViewModelTest {
         val field = CarelevoPatchConnectViewModel::class.java.getDeclaredField("_isScanWorking")
         field.isAccessible = true
         field.setBoolean(sut, value)
+    }
+
+    /** The VM's private Rx bag — used to prove `onCleared` actually releases in-flight work. */
+    private fun compositeDisposable(): CompositeDisposable {
+        val field = CarelevoPatchConnectViewModel::class.java.getDeclaredField("compositeDisposable")
+        field.isAccessible = true
+        return field.get(sut) as CompositeDisposable
+    }
+
+    /** `onCleared` is `protected` (inherited from [androidx.lifecycle.ViewModel]); the framework calls it. */
+    private fun invokeOnCleared() {
+        val method = CarelevoPatchConnectViewModel::class.java.getDeclaredMethod("onCleared")
+        method.isAccessible = true
+        method.invoke(sut)
     }
 
     /** Queue answer for `commandQueue.customCommand`; built before the stub that returns it. */
@@ -333,6 +356,95 @@ internal class CarelevoPatchConnectViewModelTest {
     }
 
     @Test
+    fun `startConnect builds the pairing spec from the wizard input the prefs and the user settings`() {
+        whenever(carelevoPatch.isBluetoothEnabled()).thenReturn(true)
+        setSelectedDevice(device)
+        whenever(carelevoPatch.userSettingInfo).thenReturn(userSettingSubject(userSettings))
+        whenever(sp.getInt(CarelevoIntPreferenceKey.CARELEVO_PATCH_EXPIRATION_REMINDER_HOURS.key, 116)).thenReturn(72)
+        whenever(sp.getBoolean(CarelevoBooleanPreferenceKey.CARELEVO_BUZZER_REMINDER.key, false)).thenReturn(true)
+        whenever { bleSession.runPairing(any(), any()) }.thenReturn(pairingResult)
+        whenever(connectNewPatchUseCase.persistNewPatch(any(), any(), any(), any(), any())).thenReturn(true)
+
+        sut.startConnect(300)
+        awaitEvent()
+
+        val addressCaptor = argumentCaptor<String>()
+        val specCaptor = argumentCaptor<CarelevoBleSession.PairingSpec>()
+        verifyBlocking(bleSession) { runPairing(addressCaptor.capture(), specCaptor.capture()) }
+
+        // The session dials the MAC the scan reported ...
+        assertThat(addressCaptor.firstValue).isEqualTo(device.address)
+        // ... and the spec carries the wizard's fill volume plus the safety limits the patch itself
+        // enforces (maxBasalSpeed/maxBolusDose) — these are written to the patch once, at activation,
+        // so a wrong value here is not correctable later without a re-pair.
+        assertThat(specCaptor.firstValue).isEqualTo(
+            CarelevoBleSession.PairingSpec(
+                volume = 300,
+                remains = 30,
+                expiry = 72,
+                maxBasalSpeed = 15.0,
+                maxBolusDose = 25.0,
+                buzzUse = true
+            )
+        )
+    }
+
+    @Test
+    fun `startConnect persists the MAC the pairing session read from the patch not the scanned address`() {
+        // The 0x3B MAC read is authoritative: the advertised address and the patch's own MAC need not
+        // match, and every later session dials the persisted one.
+        val sessionReported = pairingResult.copy(address = "aa:bb:cc:dd:ee:ff")
+        whenever(carelevoPatch.isBluetoothEnabled()).thenReturn(true)
+        setSelectedDevice(device)
+        whenever(carelevoPatch.userSettingInfo).thenReturn(userSettingSubject(userSettings))
+        whenever(sp.getInt(CarelevoIntPreferenceKey.CARELEVO_PATCH_EXPIRATION_REMINDER_HOURS.key, 116)).thenReturn(72)
+        whenever { bleSession.runPairing(any(), any()) }.thenReturn(sessionReported)
+        whenever(connectNewPatchUseCase.persistNewPatch(any(), any(), any(), any(), any())).thenReturn(true)
+
+        sut.startConnect(250)
+        awaitEvent()
+
+        val addressCaptor = argumentCaptor<String>()
+        val requestCaptor = argumentCaptor<CarelevoConnectNewPatchRequestModel>()
+        verify(connectNewPatchUseCase).persistNewPatch(
+            addressCaptor.capture(),
+            eq(sessionReported.serialNumber),
+            eq(sessionReported.firmwareVersion),
+            eq(sessionReported.modelName),
+            requestCaptor.capture()
+        )
+        assertThat(addressCaptor.firstValue).isEqualTo("aa:bb:cc:dd:ee:ff")
+        assertThat(addressCaptor.firstValue).isNotEqualTo(device.address)
+        // The same request that drove the pairing writes is the one persisted.
+        assertThat(requestCaptor.firstValue.volume).isEqualTo(250)
+        assertThat(requestCaptor.firstValue.expiry).isEqualTo(72)
+        assertThat(requestCaptor.firstValue.maxBasalSpeed).isEqualTo(15.0)
+        assertThat(requestCaptor.firstValue.maxVolume).isEqualTo(25.0)
+    }
+
+    @Test
+    fun `startConnect lets a cancellation cancel the coroutine instead of reporting a pairing failure`() {
+        whenever(carelevoPatch.isBluetoothEnabled()).thenReturn(true)
+        setSelectedDevice(device)
+        whenever(carelevoPatch.userSettingInfo).thenReturn(userSettingSubject(userSettings))
+        val pairingCalled = CountDownLatch(1)
+        whenever { bleSession.runPairing(any(), any()) }.thenAnswer {
+            pairingCalled.countDown()
+            throw CancellationException("wizard step left")
+        }
+
+        sut.startConnect(300)
+
+        // runCatching swallows CancellationException too, so the onFailure arm must rethrow it: leaving
+        // it to fall through to ConnectFailed would pop a spurious "pairing failed" dialog when the user
+        // simply navigated away mid-pair.
+        assertThat(pairingCalled.await(3, TimeUnit.SECONDS)).isTrue()
+        Thread.sleep(200) // let the fold arm run; it must stay silent
+        assertThat(events).isEmpty()
+        verify(connectNewPatchUseCase, never()).persistNewPatch(any(), any(), any(), any(), any())
+    }
+
+    @Test
     fun `startConnect reports failure when persisting the new patch fails`() {
         whenever(carelevoPatch.isBluetoothEnabled()).thenReturn(true)
         setSelectedDevice(device)
@@ -403,6 +515,20 @@ internal class CarelevoPatchConnectViewModelTest {
     }
 
     @Test
+    fun `startPatchDiscardProcess routes a booted but disconnected patch through the command queue`() {
+        // NotConnectedBooted is still a real patch on the body — only the link is down, so the discard
+        // must go through the queue (which reconnects first), not straight to the DB-only fallback.
+        whenever(carelevoPatch.patchState).thenReturn(patchStateSubject(PatchState.NotConnectedBooted))
+        stubQueueResult(success = true)
+
+        sut.startPatchDiscardProcess()
+
+        assertThat(events).contains(CarelevoConnectPrepareEvent.DiscardComplete)
+        verifyBlocking(commandQueue) { customCommand(any<CmdDiscard>()) }
+        verify(patchForceDiscardUseCase, never()).execute()
+    }
+
+    @Test
     fun `startPatchDiscardProcess falls back to force-discard when the queue cannot reach the patch`() {
         whenever(carelevoPatch.patchState).thenReturn(patchStateSubject(PatchState.ConnectedBooted))
         stubQueueResult(success = false)
@@ -454,6 +580,24 @@ internal class CarelevoPatchConnectViewModelTest {
 
         assertThat(events).contains(CarelevoConnectPrepareEvent.DiscardFailed)
         assertThat(sut.uiState.value).isEqualTo(UiState.Idle)
+    }
+
+    // ---- onCleared ----------------------------------------------------------------------------
+
+    @Test
+    fun `onCleared disposes force-discard work still in flight`() {
+        whenever(carelevoPatch.patchState).thenReturn(patchStateSubject(PatchState.ConnectedBooted))
+        stubQueueResult(success = false)
+        // Never terminates → the subscription stays parked in the VM's CompositeDisposable, which is
+        // exactly the state onCleared exists to clean up (the wizard step can be torn down mid-discard).
+        whenever(patchForceDiscardUseCase.execute()).thenReturn(Single.never())
+
+        sut.startPatchDiscardProcess()
+        assertThat(compositeDisposable().size()).isEqualTo(1)
+
+        invokeOnCleared()
+
+        assertThat(compositeDisposable().size()).isEqualTo(0)
     }
 
     // ---- resetForEnterStep --------------------------------------------------------------------

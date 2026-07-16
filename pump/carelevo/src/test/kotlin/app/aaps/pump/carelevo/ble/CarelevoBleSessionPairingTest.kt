@@ -7,8 +7,11 @@ import app.aaps.core.interfaces.pump.ble.BleScanner
 import app.aaps.core.interfaces.pump.ble.BleTransportListener
 import app.aaps.core.interfaces.pump.ble.PairingState
 import app.aaps.core.interfaces.pump.ble.ScannedDevice
+import app.aaps.pump.carelevo.ble.commands.AlertAlarmSetCommand
+import app.aaps.pump.carelevo.ble.commands.SafetyCheckResponse
 import com.google.common.truth.Truth.assertThat
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -22,10 +25,16 @@ import kotlin.experimental.xor
 import kotlin.test.assertFailsWith
 
 /**
- * Tests [CarelevoBleSession.runPairing] against a scripted fake pump — including the **set-time retry
- * round**: each `requestMultiple` round registers a fresh waiter, so rounds stay isolated and the
- * scenario is scriptable — round 1 answers with an empty serial, round 2 with a valid one, and the
- * retry is observable on the wire (two 0x11 writes).
+ * Tests [CarelevoBleSession] against a scripted fake pump.
+ *
+ * [CarelevoBleSession.runPairing] — including the **set-time retry round**: each `requestMultiple` round
+ * registers a fresh waiter, so rounds stay isolated and the scenario is scriptable — round 1 answers with
+ * an empty serial, round 2 with a valid one, and the retry is observable on the wire (two 0x11 writes).
+ *
+ * Then the other session ops ([CarelevoBleSession.readInfusionInfo], [CarelevoBleSession.runSingle],
+ * [CarelevoBleSession.runSafetyCheck], [CarelevoBleSession.runBasalProgram]) and the `withSession`
+ * guarantees they all share: address normalization, connect refusal/timeout, the bond poll, the
+ * close-and-release teardown on a blown deadline, and the inter-session settle spacing.
  *
  * Uses `runTest` virtual time with the session's `sessionDispatcher` test seam — the events SharedFlow
  * has no replay, so with real dispatchers an instantly-scripted response can be emitted before the
@@ -128,11 +137,175 @@ internal class CarelevoBleSessionPairingTest {
         assertThat(transport.createBondCalls).isEqualTo(1)
     }
 
+    @Test
+    fun `runPairing times out when the bond never completes`() = runTest {
+        useTestDispatcher()
+        transport.bonded = false
+        transport.bondOnCreate = false // SMP never finishes → the poll never sees a bond
+
+        assertFailsWith<TimeoutCancellationException> { session.runPairing(ADDRESS, spec) }
+
+        // The bond wait is bounded on its own (15 s), inside the wider open() budget: createBond was
+        // issued, the poll gave up, and no protocol write ever went out on an unbonded link.
+        assertThat(transport.createBondCalls).isEqualTo(1)
+        assertThat(testScheduler.currentTime).isEqualTo(BOND_TIMEOUT_MS)
+        assertThat(transport.writes).isEmpty()
+    }
+
+    // ===== The other session ops =====
+
+    @Test
+    fun `readInfusionInfo runs the status read and decodes the report`() = runTest {
+        useTestDispatcher()
+
+        val info = session.readInfusionInfo(ADDRESS)
+
+        assertThat(transport.writes.map { it[0] }).isEqualTo(listOf(INFUSION_INFO_OPCODE))
+        assertThat(info.runningMinutes).isEqualTo(150)
+        assertThat(info.insulinRemaining).isEqualTo(150.5)
+        assertThat(info.infusedTotalBasalAmount).isEqualTo(10.25)
+        assertThat(info.infusedTotalBolusAmount).isEqualTo(5.5)
+        assertThat(info.pumpStateRaw).isEqualTo(2)
+        assertThat(info.modeRaw).isEqualTo(1)
+    }
+
+    @Test
+    fun `runSingle runs an arbitrary command on a fresh session`() = runTest {
+        useTestDispatcher()
+
+        val result = session.runSingle(ADDRESS, AlertAlarmSetCommand(3))
+
+        assertThat(result.resultCode).isEqualTo(0)
+        assertThat(transport.writes.single()).isEqualTo(byteArrayOf(ALERT_ALARM_OPCODE, 3))
+    }
+
+    @Test
+    fun `runSafetyCheck reports every progress frame and completes on the terminal frame`() = runTest {
+        useTestDispatcher()
+        transport.safetyCheckProgressFrames = 2
+
+        val frames = mutableListOf<SafetyCheckResponse>()
+        session.runSafetyCheck(ADDRESS) { frames += it }
+
+        // onFrame sees each progress report as the pump streams it, then the terminal SUCCESS.
+        assertThat(frames.map { it.resultCode }).isEqualTo(listOf(SAFETY_PROGRESS_RESULT, SAFETY_PROGRESS_RESULT, 0))
+        assertThat(frames.last().insulinVolume).isEqualTo(210)
+        assertThat(frames.last().durationSeconds).isEqualTo(210)
+        assertThat(transport.writes.single()[0]).isEqualTo(SAFETY_CHECK_OPCODE)
+    }
+
+    @Test
+    fun `runBasalProgram writes every seqNo on ONE session and reports success`() = runTest {
+        useTestDispatcher()
+
+        val ok = session.runBasalProgram(ADDRESS, listOf(listOf(1.0), listOf(2.0), listOf(3.0)))
+
+        assertThat(ok).isTrue()
+        assertThat(transport.writes.map { it[0] }).isEqualTo(List(3) { BASAL_SET_OPCODE })
+        assertThat(transport.writes.map { it[1] }).isEqualTo(listOf<Byte>(0, 1, 2))
+        // One session for all three: the link was opened once and released once.
+        assertThat(transport.connectAddresses).hasSize(1)
+    }
+
+    @Test
+    fun `runBasalProgram short-circuits on the first rejected seqNo`() = runTest {
+        useTestDispatcher()
+        transport.basalRejectAtSeq = 1
+
+        val ok = session.runBasalProgram(ADDRESS, listOf(listOf(1.0), listOf(2.0), listOf(3.0)))
+
+        assertThat(ok).isFalse()
+        // seqNo 2 must NOT follow a rejected seqNo 1 — no partial program left on the pump.
+        assertThat(transport.writes.map { it[1] }).isEqualTo(listOf<Byte>(0, 1))
+    }
+
+    @Test
+    fun `runBasalProgram update sends the mid-therapy change opcode`() = runTest {
+        useTestDispatcher()
+
+        val ok = session.runBasalProgram(ADDRESS, listOf(listOf(1.0)), isUpdate = true)
+
+        assertThat(ok).isTrue()
+        assertThat(transport.writes.single()[0]).isEqualTo(BASAL_UPDATE_OPCODE)
+    }
+
+    // ===== withSession: open, teardown, spacing =====
+
+    @Test
+    fun `session normalizes the stored lowercase address before dialing`() = runTest {
+        useTestDispatcher()
+
+        session.readInfusionInfo("94:b2:16:1d:2f:6d")
+
+        // BluetoothAdapter.getRemoteDevice throws on a lowercase MAC; the stored address is lowercase.
+        assertThat(transport.connectAddresses).containsExactly(ADDRESS)
+    }
+
+    @Test
+    fun `session fails fast when the BLE stack refuses the connect`() = runTest {
+        useTestDispatcher()
+        transport.connectRefused = true
+
+        val e = assertFailsWith<IllegalArgumentException> { session.readInfusionInfo(ADDRESS) }
+
+        assertThat(e.message).contains("connect() refused")
+        assertThat(transport.writes).isEmpty()
+        // The refused session still released the transport's single listener slot.
+        assertThat(transport.capturedListener).isNull()
+    }
+
+    @Test
+    fun `session times out when the patch never reports CONNECTED`() = runTest {
+        useTestDispatcher()
+        transport.reportConnected = false
+
+        assertFailsWith<TimeoutCancellationException> { session.readInfusionInfo(ADDRESS) }
+
+        // The whole connect→discover→enable handshake is bounded, so a lost callback cannot suspend
+        // forever while holding sessionMutex.
+        assertThat(testScheduler.currentTime).isEqualTo(CONNECT_TIMEOUT_MS)
+        assertThat(transport.writes).isEmpty()
+        assertThat(transport.capturedListener).isNull()
+    }
+
+    @Test
+    fun `an op that blows its deadline still tears the session down and frees the next one`() = runTest {
+        useTestDispatcher()
+        transport.silentOpcodes += INFUSION_INFO_OPCODE // patch never answers 0x31
+
+        assertFailsWith<TimeoutCancellationException> { session.readInfusionInfo(ADDRESS) }
+
+        // finally: the gatt was closed (listener slot released) despite the blown deadline...
+        assertThat(transport.capturedListener).isNull()
+        // ...and sessionMutex was freed, so a later op — e.g. an out-of-band bolus cancel — still runs.
+        assertThat(session.runSingle(ADDRESS, AlertAlarmSetCommand(0)).resultCode).isEqualTo(0)
+    }
+
+    @Test
+    fun `back-to-back sessions wait out the inter-session settle before reconnecting`() = runTest {
+        useTestDispatcher()
+        // Warm-up session: the first session has no previous close to space out from, and it primes
+        // class loading so the wall-clock gap the settle measures stays far below its 1 s window.
+        session.runSingle(ADDRESS, AlertAlarmSetCommand(0))
+        val afterFirst = testScheduler.currentTime
+
+        session.runSingle(ADDRESS, AlertAlarmSetCommand(0))
+        val afterSecond = testScheduler.currentTime
+
+        assertThat(afterFirst).isEqualTo(0L) // nothing to settle from on the first session
+        // The second dial waits (near enough) the full settle: the patch needs time to release the link.
+        assertThat(afterSecond - afterFirst).isAtLeast(SETTLE_LOWER_BOUND_MS)
+        assertThat(afterSecond - afterFirst).isAtMost(INTER_SESSION_SETTLE_MS)
+    }
+
     // ===== Fixtures =====
 
     /**
      * Scripted patch: answers each opcode like a real CareLevo, with [emptySerialRounds] initial
      * set-time rounds reporting a blank serial (13 spaces) before valid rounds.
+     *
+     * Every knob below defaults to the well-behaved patch, so a test opts into exactly the one
+     * misbehaviour it is about.
      */
     private class FakePairingTransport : CarelevoBleTransport {
 
@@ -141,6 +314,27 @@ internal class CarelevoBleSessionPairingTest {
         var emptySerialRounds = 0
         var bonded = true
         var createBondCalls = 0
+
+        /** Every address `gatt.connect` was dialed with, in order (one entry per session). */
+        val connectAddresses = mutableListOf<String>()
+
+        /** `connect()` returns false — the BLE stack refused to start the connection. */
+        var connectRefused = false
+
+        /** `connect()` succeeds but the patch never reports STATE_CONNECTED. */
+        var reportConnected = true
+
+        /** `createBond()` completes the SMP (flips [bonded]); false → the bond poll never resolves. */
+        var bondOnCreate = true
+
+        /** Opcodes the patch silently ignores — the caller's deadline is the only way out. */
+        val silentOpcodes = mutableSetOf<Byte>()
+
+        /** Progress frames the safety check streams before its terminal frame. */
+        var safetyCheckProgressFrames = 1
+
+        /** seqNo whose basal-program write is rejected (non-zero resultCode); null → all accepted. */
+        var basalRejectAtSeq: Int? = null
 
         private var setTimeRounds = 0
 
@@ -153,7 +347,7 @@ internal class CarelevoBleSessionPairingTest {
             override fun isDeviceBonded(address: String): Boolean = bonded
             override fun createBond(address: String): Boolean {
                 createBondCalls++
-                bonded = true
+                if (bondOnCreate) bonded = true
                 return true
             }
 
@@ -168,7 +362,9 @@ internal class CarelevoBleSessionPairingTest {
 
         override val gatt: BleGatt = object : BleGatt {
             override fun connect(address: String): Boolean {
-                capturedListener?.onConnectionStateChanged(true)
+                connectAddresses += address
+                if (connectRefused) return false
+                if (reportConnected) capturedListener?.onConnectionStateChanged(true)
                 return true
             }
 
@@ -186,26 +382,43 @@ internal class CarelevoBleSessionPairingTest {
             override fun writeCharacteristic(data: ByteArray) {
                 writes += data
                 capturedListener?.onCharacteristicWritten()
-                respondTo(data[0])
+                respondTo(data)
             }
         }
 
-        private fun respondTo(opcode: Byte) {
+        private fun respondTo(request: ByteArray) {
             val listener = capturedListener ?: return
+            val opcode = request[0]
+            if (opcode in silentOpcodes) return
             when (opcode) {
-                MAC_REQUEST_OPCODE -> listener.onCharacteristicChanged(byteArrayOf(MAC_RESPONSE_OPCODE) + MAC_BYTES + CHECKSUM_BYTE)
-                APP_AUTH_OPCODE    -> listener.onCharacteristicChanged(byteArrayOf(APP_AUTH_ACK_OPCODE, RESULT_SUCCESS))
-                SET_TIME_OPCODE    -> {
+                MAC_REQUEST_OPCODE   -> listener.onCharacteristicChanged(byteArrayOf(MAC_RESPONSE_OPCODE) + MAC_BYTES + CHECKSUM_BYTE)
+                APP_AUTH_OPCODE      -> listener.onCharacteristicChanged(byteArrayOf(APP_AUTH_ACK_OPCODE, RESULT_SUCCESS))
+                SET_TIME_OPCODE      -> {
                     setTimeRounds++
                     val serial = if (setTimeRounds <= emptySerialRounds) BLANK_SERIAL else SERIAL
                     listener.onCharacteristicChanged(byteArrayOf(RPT1_OPCODE, RESULT_SUCCESS) + serial.toByteArray(Charsets.US_ASCII))
                     listener.onCharacteristicChanged(RPT2_FRAME)
                 }
 
-                ALERT_ALARM_OPCODE -> listener.onCharacteristicChanged(byteArrayOf(ALERT_ALARM_ACK_OPCODE, RESULT_SUCCESS))
-                THRESHOLD_OPCODE   -> listener.onCharacteristicChanged(byteArrayOf(THRESHOLD_ACK_OPCODE, RESULT_SUCCESS))
+                ALERT_ALARM_OPCODE   -> listener.onCharacteristicChanged(byteArrayOf(ALERT_ALARM_ACK_OPCODE, RESULT_SUCCESS))
+                THRESHOLD_OPCODE     -> listener.onCharacteristicChanged(byteArrayOf(THRESHOLD_ACK_OPCODE, RESULT_SUCCESS))
+                INFUSION_INFO_OPCODE -> listener.onCharacteristicChanged(INFUSION_INFO_FRAME)
+                SAFETY_CHECK_OPCODE  -> {
+                    // Streams progress reports, then the terminal SUCCESS — all on 0x72.
+                    repeat(safetyCheckProgressFrames) { listener.onCharacteristicChanged(safetyFrame(SAFETY_PROGRESS_RESULT.toByte())) }
+                    listener.onCharacteristicChanged(safetyFrame(RESULT_SUCCESS))
+                }
+
+                BASAL_SET_OPCODE     -> listener.onCharacteristicChanged(byteArrayOf(BASAL_SET_ACK_OPCODE, basalResultFor(request[1])))
+                BASAL_UPDATE_OPCODE  -> listener.onCharacteristicChanged(byteArrayOf(BASAL_UPDATE_ACK_OPCODE, basalResultFor(request[1])))
             }
         }
+
+        /** `[0] 0x72, [1] result, [2..3] volume 210 U, [4..5] duration 210 s`. */
+        private fun safetyFrame(result: Byte) = byteArrayOf(SAFETY_CHECK_ACK_OPCODE, result, 0x02, 0x0A, 0x03, 0x1E)
+
+        private fun basalResultFor(seqNo: Byte): Byte =
+            if (seqNo.toInt() == basalRejectAtSeq) BASAL_REJECTED else RESULT_SUCCESS
 
         private val _pairingState = MutableStateFlow(PairingState())
         override val pairingState = _pairingState
@@ -221,6 +434,17 @@ internal class CarelevoBleSessionPairingTest {
 
     private companion object {
 
+        const val ADDRESS = "94:B2:16:1D:2F:6D"
+
+        // withSession/open budgets under test (mirrored from CarelevoBleSession's private companion).
+        const val CONNECT_TIMEOUT_MS = 20_000L
+        const val BOND_TIMEOUT_MS = 15_000L
+        const val INTER_SESSION_SETTLE_MS = 1000L
+
+        // The settle is measured against the WALL clock while the test runs on virtual time, so the
+        // delay is (settle − real ms spent between the two sessions). Assert a band, not an equality.
+        const val SETTLE_LOWER_BOUND_MS = 500L
+
         const val MAC_REQUEST_OPCODE: Byte = 0x3B
         const val MAC_RESPONSE_OPCODE: Byte = 0x9B.toByte()
         const val APP_AUTH_OPCODE: Byte = 0x4B
@@ -232,6 +456,32 @@ internal class CarelevoBleSessionPairingTest {
         const val THRESHOLD_OPCODE: Byte = 0x1B
         const val THRESHOLD_ACK_OPCODE: Byte = 0x7B
         const val RESULT_SUCCESS: Byte = 0x00
+
+        const val INFUSION_INFO_OPCODE: Byte = 0x31
+        const val INFUSION_INFO_ACK_OPCODE: Byte = 0x91.toByte()
+        const val SAFETY_CHECK_OPCODE: Byte = 0x12
+        const val SAFETY_CHECK_ACK_OPCODE: Byte = 0x72
+        const val SAFETY_PROGRESS_RESULT = 4 // REP_REQUEST — a non-terminal progress report
+        const val BASAL_SET_OPCODE: Byte = 0x13
+        const val BASAL_SET_ACK_OPCODE: Byte = 0x73
+        const val BASAL_UPDATE_OPCODE: Byte = 0x21
+        const val BASAL_UPDATE_ACK_OPCODE: Byte = 0x81.toByte()
+        const val BASAL_REJECTED: Byte = 0x05
+
+        // Real-shape 20-byte 0x91: running 2*60+30=150 min, remaining 1*100+50+50/100=150.5 U,
+        // basal total 10+25/100=10.25 U, bolus total 5+50/100=5.5 U, pumpState 2, mode 1.
+        val INFUSION_INFO_FRAME = byteArrayOf(
+            INFUSION_INFO_ACK_OPCODE, 0x00,
+            0x02, 0x1E,
+            0x01, 0x32, 0x32,
+            0x0A, 0x19,
+            0x05, 0x32,
+            0x02,
+            0x01,
+            0x00, 0x00,
+            0x03, 0x00,
+            0x00, 0x01, 0x0A
+        )
 
         val MAC_BYTES = byteArrayOf(0x94.toByte(), 0xB2.toByte(), 0x16, 0x1D, 0x2F, 0x6D)
         const val CHECKSUM_BYTE: Byte = 0xAB.toByte()

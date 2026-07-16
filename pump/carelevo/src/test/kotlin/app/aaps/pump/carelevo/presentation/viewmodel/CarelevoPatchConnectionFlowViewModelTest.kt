@@ -859,4 +859,59 @@ class CarelevoPatchConnectionFlowViewModelTest {
         assertThat(sut.uiState.value).isEqualTo(UiState.Idle)
         verify(carelevoPatch, never()).discardTeardown()
     }
+
+    // ---- residual guard branches --------------------------------------------------------------
+
+    @Test
+    fun `initWorkflow keeps an already valid profile selection instead of re-reading the active one`() = runTest(testDispatcher) {
+        stubWorkflow(needsProfileGate = true)
+        val profiles = listOf("Adult", "Night").map { profileName -> mock<SingleProfile> { on { name } doReturn profileName } }
+        whenever(profileRepository.profiles).thenReturn(MutableStateFlow(profiles))
+        // A selection made before the gate is rebuilt is still valid, so it must survive verbatim.
+        sut.selectProfile("Night")
+
+        sut.initWorkflow(CarelevoScreenType.CONNECTION_FLOW_START)
+        advanceUntilIdle()
+
+        assertThat(sut.selectedProfile.value).isEqualTo("Night")
+        verifyBlocking(profileFunction, never()) { getOriginalProfileName() }
+    }
+
+    @Test
+    fun `initWorkflow starts at the first step for the discard entry point`() = runTest(testDispatcher) {
+        stubWorkflow()
+
+        sut.initWorkflow(CarelevoScreenType.PATCH_DISCARD)
+        advanceUntilIdle()
+
+        assertThat(sut.page.value).isEqualTo(CarelevoPatchStep.PATCH_START)
+        assertThat(sut.currentStepIndex.value).isEqualTo(0)
+    }
+
+    @Test
+    fun `advanceFromInsulin commits the switch when there is no active profile to compare against`() = runTest(testDispatcher) {
+        whenever(profileFunction.getProfile()).thenReturn(null)
+        sut.selectInsulin(lyumjev)
+
+        sut.advanceFromInsulin()
+        advanceUntilIdle()
+
+        // A null active label can never equal the selection, so the switch is committed before advancing.
+        verifyBlocking(profileFunction) { createProfileSwitchWithNewInsulin(eq(lyumjev), eq(Sources.Carelevo)) }
+    }
+
+    @Test
+    fun `startPatchDiscardProcess completes immediately when the patch state optional is empty`() = runTest(testDispatcher) {
+        // Distinct from "no state yet": the subject has a value, but it carries no PatchState.
+        patchStateSubject.onNext(Optional.empty<PatchState>())
+        val events = collectEvents()
+
+        sut.startPatchDiscardProcess()
+        advanceUntilIdle()
+
+        assertThat(events).containsExactly(CarelevoConnectEvent.DiscardComplete)
+        assertThat(sut.uiState.value).isEqualTo(UiState.Idle)
+        verifyBlocking(commandQueue, never()) { customCommand(any()) }
+        verify(patchForceDiscardUseCase, never()).execute()
+    }
 }

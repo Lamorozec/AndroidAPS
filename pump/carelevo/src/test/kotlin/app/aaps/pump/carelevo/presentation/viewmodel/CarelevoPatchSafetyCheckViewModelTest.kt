@@ -13,6 +13,8 @@ import app.aaps.pump.carelevo.common.model.Event
 import app.aaps.pump.carelevo.common.model.PatchState
 import app.aaps.pump.carelevo.common.model.UiState
 import app.aaps.pump.carelevo.domain.model.ResponseResult
+import app.aaps.pump.carelevo.domain.model.bt.SafetyCheckResult
+import app.aaps.pump.carelevo.domain.model.bt.SafetyCheckResultModel
 import app.aaps.pump.carelevo.domain.model.patch.CarelevoPatchInfoDomainModel
 import app.aaps.pump.carelevo.domain.model.result.ResultSuccess
 import app.aaps.pump.carelevo.domain.type.SafetyProgress
@@ -24,6 +26,7 @@ import com.google.common.truth.Truth.assertThat
 import io.reactivex.rxjava3.core.Single
 import io.reactivex.rxjava3.plugins.RxJavaPlugins
 import io.reactivex.rxjava3.schedulers.Schedulers
+import io.reactivex.rxjava3.schedulers.TestScheduler
 import io.reactivex.rxjava3.subjects.BehaviorSubject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -51,6 +54,7 @@ import org.mockito.kotlin.verifyBlocking
 import org.mockito.kotlin.whenever
 import org.mockito.quality.Strictness
 import java.util.Optional
+import java.util.concurrent.TimeUnit
 
 /**
  * JVM (non-Robolectric) unit tests for [CarelevoPatchSafetyCheckViewModel].
@@ -73,11 +77,25 @@ import java.util.Optional
  * verified with `verifyBlocking`.
  *
  * Rx schedulers are stubbed to [Schedulers.trampoline] so the force-discard `Single` runs
- * synchronously on the test thread. Note the ticker started by the safety-check progress branch uses
- * `Observable.intervalRange`, which is hard-wired to the computation scheduler — so its ticks are
- * genuinely asynchronous. Assertions are therefore only made on values that are stable once the
- * (synchronous) terminal block has run: it disposes the ticker BEFORE writing the final
- * progress/remainSec, so no late tick can race the assertion.
+ * synchronously on the test thread.
+ *
+ * The countdown ticker is the one thing the injected [AapsSchedulers] does NOT reach: the VM builds it
+ * with the 5-arg `Observable.intervalRange`, whose overload hard-wires `Schedulers.computation()` (only
+ * the `observeOn` hop is injected). It is virtualised instead through
+ * [RxJavaPlugins.setComputationSchedulerHandler], which swaps in a [TestScheduler] — `Schedulers
+ * .computation()` routes through that plugin hook on every call, so `intervalRange` picks it up. Ticks
+ * then fire only on an explicit [TestScheduler.triggerActions]/[TestScheduler.advanceTimeBy], and the
+ * `observeOn(trampoline)` hop redelivers them in-line on the advancing thread — so a tick is fully
+ * applied to the StateFlows by the time `advanceTimeBy` returns.
+ *
+ * That is also why the ticker tests drive time from INSIDE the `customCommand` answer (see
+ * [stubCustomCommandEmitting]): that is the only window in which the ticker is alive, since the
+ * terminal block disposes it before writing the final progress/remainSec.
+ *
+ * Timeout arithmetic, for reading the expectations below: the executor emits
+ * `Progress(durationSeconds + 30)` (a 30 s headroom, `SAFETY_PROGRESS_HEADROOM_SEC`), the frame handler
+ * seeds `remainSec` with that full value, and `startTicker` then subtracts the headroom again and
+ * unwinds the REAL duration. So a `Progress(90)` frame means a 60 s bar: tick 30 → 50 %, tick 60 → 100 %.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 @ExtendWith(MockitoExtension::class)
@@ -102,10 +120,18 @@ internal class CarelevoPatchSafetyCheckViewModelTest {
 
     private val address = "aa:bb:cc:dd:ee:ff"
 
+    /** Virtual clock for the countdown ticker — see class KDoc. Fresh per test. */
+    private lateinit var testScheduler: TestScheduler
+
     @BeforeEach
     fun setUp() {
         Dispatchers.setMain(Dispatchers.Unconfined)
         collectorScope = CoroutineScope(Dispatchers.Unconfined)
+        // Virtualise the ticker's hard-wired computation scheduler. This also pins the tests that do
+        // NOT drive time: with a TestScheduler that is never advanced, intervalRange cannot fire a
+        // stray tick, so a seeded bar stays exactly as the Progress frame left it.
+        testScheduler = TestScheduler()
+        RxJavaPlugins.setComputationSchedulerHandler { testScheduler }
         // The force-discard Single ends in a 1-arg subscribe(onSuccess) with no onError, so a failing
         // Single routes an OnErrorNotImplementedException to the global Rx handler. Swallow it: the
         // doOnError side effects are what the test asserts.
@@ -147,24 +173,41 @@ internal class CarelevoPatchSafetyCheckViewModelTest {
         whenever(commandQueue.customCommand(any())).thenReturn(result)
     }
 
-    /**
-     * Stub `customCommand` so it emits one Progress frame while "running", then returns [result].
-     *
-     * Both [yield]s are load-bearing, because `startSafetyCheck` launches its progress collector and
-     * only THEN awaits `customCommand` — a stub that returns instantly is cancelled before the
-     * collector ever runs. The first yield lets the collector get scheduled and subscribe (without it
-     * subscriptionCount stays 0 and the replay-0 SharedFlow drops the emit); the second lets the
-     * collector's dispatched resumption actually process the frame before the answer returns and the
-     * terminal block cancels it. Together they reproduce the real queue round-trip's suspension.
-     */
+    /** Stub `customCommand` so it emits one 60 s Progress frame while "running", then returns [result]. */
     private fun stubCustomCommandEmittingProgress(
+        result: PumpEnactResult,
+        onSeeded: () -> Unit = {}
+    ) = stubCustomCommandEmitting(listOf(SafetyProgress.Progress(60L)), result, onSeeded)
+
+    /**
+     * Stub `customCommand` so it emits [frames] one at a time while "running", then invokes [onSeeded]
+     * and returns [result].
+     *
+     * The [yield]s are load-bearing, because `startSafetyCheck` launches its progress collector and
+     * only THEN awaits `customCommand` — a stub that returns instantly is cancelled before the
+     * collector ever runs. The leading yield lets the collector get scheduled and subscribe (without it
+     * subscriptionCount stays 0 and the replay-0 SharedFlow drops the emit); the per-frame yield lets
+     * the collector's dispatched resumption actually process that frame before the next one (or the
+     * answer returning, and the terminal block cancelling it). Together they reproduce the real queue
+     * round-trip's suspension.
+     *
+     * [onSeeded] runs at the one moment the ticker is both armed and not yet disposed, on the test
+     * thread — so it is where the ticker tests advance [testScheduler] and sample the StateFlows.
+     * Keep it assertion-free: it executes inside the VM's coroutine, so a thrown AssertionError would
+     * surface as an unrelated coroutine failure rather than a clean test failure. Capture into a var
+     * and assert after [CarelevoPatchSafetyCheckViewModel.startSafetyCheck] returns.
+     */
+    private fun stubCustomCommandEmitting(
+        frames: List<SafetyProgress>,
         result: PumpEnactResult,
         onSeeded: () -> Unit = {}
     ) = runBlocking {
         whenever(commandQueue.customCommand(any())).doSuspendableAnswer {
             yield()
-            progressFlow.emit(SafetyProgress.Progress(60L))
-            yield()
+            frames.forEach {
+                progressFlow.emit(it)
+                yield()
+            }
             onSeeded()
             result
         }
@@ -348,6 +391,193 @@ internal class CarelevoPatchSafetyCheckViewModelTest {
         assertThat(progressValues).contains(0)
         assertThat(events).contains(CarelevoConnectSafetyCheckEvent.SafetyCheckFailed)
         assertThat(sut.progress.value).isNotEqualTo(100)
+    }
+
+    // ---- startSafetyCheck: the countdown ticker -------------------------------------------------
+
+    @Test
+    fun `the first tick re-bases the countdown from the padded timeout onto the real duration`() {
+        whenever(carelevoPatch.isBluetoothEnabled()).thenReturn(true)
+        var seededRemain: Long? = null
+        var tickZero: Pair<Int?, Long?>? = null
+        // Progress(90) = a 60 s check + the executor's 30 s headroom.
+        stubCustomCommandEmitting(listOf(SafetyProgress.Progress(90L)), enactResult(true)) {
+            seededRemain = sut.remainSec.value
+            testScheduler.triggerActions()
+            tickZero = sut.progress.value to sut.remainSec.value
+        }
+
+        sut.startSafetyCheck()
+
+        // The frame handler seeds the FULL padded timeout...
+        assertThat(seededRemain).isEqualTo(90L)
+        // ...and the ticker immediately re-bases it onto the 60 s the check actually takes, so the
+        // countdown the user reads is the duration, not the duration + slack.
+        assertThat(tickZero).isEqualTo(0 to 60L)
+    }
+
+    @Test
+    fun `the ticker advances the bar proportionally as the check runs`() {
+        whenever(carelevoPatch.isBluetoothEnabled()).thenReturn(true)
+        var halfway: Pair<Int?, Long?>? = null
+        var finished: Pair<Int?, Long?>? = null
+        stubCustomCommandEmitting(listOf(SafetyProgress.Progress(90L)), enactResult(true)) {
+            testScheduler.triggerActions()
+            testScheduler.advanceTimeBy(30, TimeUnit.SECONDS)
+            halfway = sut.progress.value to sut.remainSec.value
+            testScheduler.advanceTimeBy(30, TimeUnit.SECONDS)
+            finished = sut.progress.value to sut.remainSec.value
+        }
+
+        sut.startSafetyCheck()
+
+        // 30 s into a 60 s window.
+        assertThat(halfway).isEqualTo(50 to 30L)
+        // The ticker reaches a full bar on its own, before the queue result arrives.
+        assertThat(finished).isEqualTo(100 to 0L)
+    }
+
+    @Test
+    fun `the ticker stops at a full bar and never overshoots its window`() {
+        whenever(carelevoPatch.isBluetoothEnabled()).thenReturn(true)
+        var overrun: Pair<Int?, Long?>? = null
+        stubCustomCommandEmitting(listOf(SafetyProgress.Progress(90L)), enactResult(true)) {
+            // Run far past the 60 s window: the emission count bounds the stream, and the percent /
+            // remain guards clamp it, so a slow check cannot drive the bar past 100 % or the
+            // countdown below zero.
+            testScheduler.advanceTimeBy(5, TimeUnit.MINUTES)
+            overrun = sut.progress.value to sut.remainSec.value
+        }
+
+        sut.startSafetyCheck()
+
+        assertThat(overrun).isEqualTo(100 to 0L)
+    }
+
+    @Test
+    fun `the progress bar never moves backwards while ticking`() {
+        whenever(carelevoPatch.isBluetoothEnabled()).thenReturn(true)
+        // Sampled synchronously inside the ticker window rather than via collectProgress(): progress is
+        // a CONFLATED StateFlow, and every write here happens nested inside the VM's coroutine, so an
+        // Unconfined collector's resumptions only drain once the outermost coroutine unwinds — by then
+        // the value is already the terminal 100 and the whole history has been conflated away. Sampling
+        // the value at each advance is the only way to observe the bar actually moving.
+        val bar = mutableListOf<Int>()
+        stubCustomCommandEmitting(listOf(SafetyProgress.Progress(90L)), enactResult(true)) {
+            testScheduler.triggerActions()
+            sut.progress.value?.let(bar::add)                       // seeded 0
+            repeat(6) {
+                testScheduler.advanceTimeBy(10, TimeUnit.SECONDS)   // 60 s bar, sampled every 10 s
+                sut.progress.value?.let(bar::add)
+            }
+        }
+
+        sut.startSafetyCheck()
+
+        sut.progress.value?.let(bar::add)                           // terminal
+        // Every value the UI saw, from the seeded 0 through the ticks to the terminal 100, is
+        // monotonic — a progress bar that jumps backwards reads as a stalled/restarted check.
+        assertThat(bar).isInOrder()
+        assertThat(bar.first()).isEqualTo(0)
+        assertThat(bar.last()).isEqualTo(100)
+        // ...and it genuinely moved through the middle rather than snapping 0 → 100.
+        assertThat(bar.any { it in 1..99 }).isTrue()
+    }
+
+    @Test
+    fun `a second progress frame re-arms the countdown and abandons the first ticker`() {
+        whenever(carelevoPatch.isBluetoothEnabled()).thenReturn(true)
+        val ok = enactResult(true)
+        var afterFirstWindow: Pair<Int?, Long?>? = null
+        var afterReArm: Pair<Int?, Long?>? = null
+        runBlocking {
+            whenever(commandQueue.customCommand(any())).doSuspendableAnswer {
+                yield()
+                progressFlow.emit(SafetyProgress.Progress(90L)) // 60 s window
+                yield()
+                testScheduler.triggerActions()
+                testScheduler.advanceTimeBy(30, TimeUnit.SECONDS)
+                afterFirstWindow = sut.progress.value to sut.remainSec.value
+                progressFlow.emit(SafetyProgress.Progress(60L)) // re-armed onto a 30 s window
+                yield()
+                testScheduler.triggerActions()
+                testScheduler.advanceTimeBy(5, TimeUnit.SECONDS)
+                afterReArm = sut.progress.value to sut.remainSec.value
+                ok
+            }
+        }
+
+        sut.startSafetyCheck()
+
+        assertThat(afterFirstWindow).isEqualTo(50 to 30L)
+        // 5 s into the new 30 s window: the bar was reset and is climbing again on the new base.
+        // This is what proves the first ticker was disposed rather than left running: a live one
+        // would be 35 s into its own window by now and, through the monotonic max, would have
+        // dragged the bar up to 58 % instead of 16 %.
+        assertThat(afterReArm).isEqualTo(16 to 25L)
+    }
+
+    @Test
+    fun `terminal safety-check frames do not arm the countdown`() {
+        whenever(carelevoPatch.isBluetoothEnabled()).thenReturn(true)
+        var duringCheck: Pair<Int?, Long?>? = null
+        val terminalFrames = listOf(
+            SafetyProgress.Success(SafetyCheckResultModel(SafetyCheckResult.SUCCESS, 30, 60)),
+            SafetyProgress.Error(IllegalStateException("safety check failed"))
+        )
+        stubCustomCommandEmitting(terminalFrames, enactResult(true)) {
+            testScheduler.advanceTimeBy(60, TimeUnit.SECONDS)
+            duringCheck = sut.progress.value to sut.remainSec.value
+        }
+
+        sut.startSafetyCheck()
+
+        // Only Progress frames drive the bar; Success/Error are the executor's own bookkeeping and
+        // must leave the countdown untouched (no ticker was ever started, hence advancing does
+        // nothing).
+        assertThat(duringCheck).isEqualTo(null to null)
+        // The queue result, not the frames, is what completes the check.
+        assertThat(sut.progress.value).isEqualTo(100)
+    }
+
+    @Test
+    fun `the terminal success snaps a half-run bar to complete and stops the ticker`() {
+        whenever(carelevoPatch.isBluetoothEnabled()).thenReturn(true)
+        stubCustomCommandEmitting(listOf(SafetyProgress.Progress(90L)), enactResult(true)) {
+            testScheduler.triggerActions()
+            testScheduler.advanceTimeBy(30, TimeUnit.SECONDS) // bar sits at 50 %
+        }
+
+        sut.startSafetyCheck()
+
+        // A check that answers early jumps the bar straight to done rather than letting it crawl.
+        assertThat(sut.progress.value).isEqualTo(100)
+        assertThat(sut.remainSec.value).isEqualTo(0L)
+
+        // The ticker was disposed before those writes, so leftover virtual time cannot resurrect the
+        // countdown. (A live ticker would put remainSec back to 20 here — the bar itself is masked by
+        // the monotonic max, so remainSec is what actually catches the leak.)
+        testScheduler.advanceTimeBy(10, TimeUnit.SECONDS)
+        assertThat(sut.progress.value).isEqualTo(100)
+        assertThat(sut.remainSec.value).isEqualTo(0L)
+    }
+
+    @Test
+    fun `a rejected check leaves the bar where the ticker stopped instead of completing it`() {
+        whenever(carelevoPatch.isBluetoothEnabled()).thenReturn(true)
+        stubCustomCommandEmitting(listOf(SafetyProgress.Progress(90L)), enactResult(false)) {
+            testScheduler.triggerActions()
+            testScheduler.advanceTimeBy(30, TimeUnit.SECONDS)
+        }
+        val events = collectEvents()
+
+        sut.startSafetyCheck()
+
+        // The failure path must not fake a finished bar — it freezes at the last tick.
+        assertThat(sut.progress.value).isEqualTo(50)
+        assertThat(sut.remainSec.value).isEqualTo(30L)
+        assertThat(events).contains(CarelevoConnectSafetyCheckEvent.SafetyCheckFailed)
+        assertThat(events).doesNotContain(CarelevoConnectSafetyCheckEvent.SafetyCheckComplete)
     }
 
     @Test

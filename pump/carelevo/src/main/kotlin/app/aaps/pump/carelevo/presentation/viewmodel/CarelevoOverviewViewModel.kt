@@ -441,7 +441,7 @@ class CarelevoOverviewViewModel @Inject constructor(
             }
 
             else                                 -> {
-                val isStop = carelevoPatch.patchInfo.value?.get()?.isStopped ?: false
+                val isStop = carelevoPatch.patchInfo.value?.getOrNull()?.isStopped ?: false
                 if (isStop) {
                     CarelevoOverviewEvent.ShowPumpResumeDialog
                 } else {

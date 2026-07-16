@@ -310,32 +310,32 @@ class CarelevoPatchNeedleInsertionViewModel @Inject constructor(
             .timeout(3000L, TimeUnit.MILLISECONDS)
             .observeOn(aapsSchedulers.io)
             .subscribeOn(aapsSchedulers.io)
-            .doOnError {
-                aapsLogger.debug(LTag.PUMPCOMM, "doOnError called : $it")
-                setUiState(UiState.Idle)
-                triggerEvent(CarelevoConnectNeedleEvent.DiscardFailed)
-            }.subscribe { response ->
-                when (response) {
-                    is ResponseResult.Success -> {
-                        aapsLogger.debug(LTag.PUMPCOMM, "response success")
-                        carelevoPatch.discardTeardown()
-                        setUiState(UiState.Idle)
-                        triggerEvent(CarelevoConnectNeedleEvent.DiscardComplete)
-                    }
+            .subscribe({ response ->
+                           when (response) {
+                               is ResponseResult.Success -> {
+                                   aapsLogger.debug(LTag.PUMPCOMM, "response success")
+                                   carelevoPatch.discardTeardown()
+                                   setUiState(UiState.Idle)
+                                   triggerEvent(CarelevoConnectNeedleEvent.DiscardComplete)
+                               }
 
-                    is ResponseResult.Error   -> {
-                        aapsLogger.debug(LTag.PUMPCOMM, "response error : ${response.e}")
-                        setUiState(UiState.Idle)
-                        triggerEvent(CarelevoConnectNeedleEvent.DiscardFailed)
-                    }
+                               is ResponseResult.Error   -> {
+                                   aapsLogger.debug(LTag.PUMPCOMM, "response error : ${response.e}")
+                                   setUiState(UiState.Idle)
+                                   triggerEvent(CarelevoConnectNeedleEvent.DiscardFailed)
+                               }
 
-                    else                      -> {
-                        aapsLogger.debug(LTag.PUMPCOMM, "response failed")
-                        setUiState(UiState.Idle)
-                        triggerEvent(CarelevoConnectNeedleEvent.DiscardFailed)
-                    }
-                }
-            }
+                               else                      -> {
+                                   aapsLogger.debug(LTag.PUMPCOMM, "response failed")
+                                   setUiState(UiState.Idle)
+                                   triggerEvent(CarelevoConnectNeedleEvent.DiscardFailed)
+                               }
+                           }
+                       }, { e ->
+                           aapsLogger.debug(LTag.PUMPCOMM, "force discard failed : $e")
+                           setUiState(UiState.Idle)
+                           triggerEvent(CarelevoConnectNeedleEvent.DiscardFailed)
+                       })
     }
 
     private fun recordNeedleInsertFailAlarm() {
