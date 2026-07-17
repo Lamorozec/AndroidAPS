@@ -12,6 +12,8 @@ import app.aaps.core.data.pump.defs.ManufacturerType
 import app.aaps.core.data.pump.defs.PumpDescription
 import app.aaps.core.data.pump.defs.PumpType
 import app.aaps.core.data.pump.defs.TimeChangeType
+import app.aaps.core.interfaces.configuration.Config
+import app.aaps.core.interfaces.configuration.ExternalOptions
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
 import app.aaps.core.interfaces.plugin.PluginDescription
@@ -112,6 +114,7 @@ class CarelevoPumpPlugin @Inject constructor(
     private val protectionCheck: ProtectionCheck,
     private val blePreCheck: BlePreCheck,
     private val iconsProvider: IconsProvider,
+    private val config: Config,
     private val uiInteraction: UiInteraction,
     private var pumpEnactResultProvider: Provider<PumpEnactResult>,
     private val carelevoPatch: CarelevoPatch,
@@ -132,7 +135,8 @@ class CarelevoPumpPlugin @Inject constructor(
                 carelevoAlarmNotifier = carelevoAlarmNotifier,
                 protectionCheck = protectionCheck,
                 blePreCheck = blePreCheck,
-                iconsProvider = iconsProvider
+                iconsProvider = iconsProvider,
+                config = config
             )
         }
         .icon(IcPluginCarelevo)
@@ -312,6 +316,11 @@ class CarelevoPumpPlugin @Inject constructor(
         // the receiver is now the ONLY btState source (adapter on/off; there is no resting link to track).
         carelevoPatch.onBluetoothStateChanged(currentAdapterBleState())
 
+        // The emulated patch has no radio, so the state seeded above is the whole truth. Subscribing
+        // anyway would let the host's adapter being switched off report OFF and kill a live emulated
+        // session — the one thing emulation is supposed to be immune to.
+        if (isEmulating) return
+
         bleReceiverDisposable = CarelevoObserveReceiver(context, createBluetoothIntentFilter())
             .subscribe { intent ->
                 aapsLogger.debug(LTag.PUMPBTCOMM, "CarelevoObserveReceiver called: ${intent.action}")
@@ -326,10 +335,20 @@ class CarelevoPumpPlugin @Inject constructor(
         bleReceiverDisposable?.let { pluginDisposable.add(it) }
     }
 
+    /**
+     * The emulated patch is reachable regardless of the host adapter, so report ON without asking it.
+     * Without this the whole driver — every `isBluetoothEnabled()` gate in the coordinators and view
+     * models — refuses before a request ever reaches the emulated transport. Mirrors the way Dana
+     * skips its BLE pre-check while emulating; Dana needs no equivalent here only because it never
+     * reads the adapter's enabled state at all.
+     */
     private fun currentAdapterBleState(): BleState {
-        val enabled = (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter?.isEnabled == true
+        val enabled = isEmulating ||
+            (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter?.isEnabled == true
         return adapterBleState(if (enabled) DeviceModuleState.DEVICE_STATE_ON else DeviceModuleState.DEVICE_STATE_OFF)
     }
+
+    private val isEmulating: Boolean get() = config.isEnabled(ExternalOptions.EMULATE_CARELEVO)
 
     /** Adapter-level state only — bond/discovery/notification fields are per-session now and never tracked. */
     private fun adapterBleState(enabled: DeviceModuleState): BleState = BleState(

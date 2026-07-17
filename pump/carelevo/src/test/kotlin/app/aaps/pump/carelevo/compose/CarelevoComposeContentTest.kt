@@ -11,6 +11,9 @@ import androidx.compose.ui.test.isSelectable
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+// Aliased: the simple name collides with Robolectric's @Config annotation used below.
+import app.aaps.core.interfaces.configuration.Config as AapsConfig
+import app.aaps.core.interfaces.configuration.ExternalOptions
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.protection.ProtectionCheck
 import app.aaps.core.interfaces.pump.BlePreCheck
@@ -89,6 +92,11 @@ class CarelevoComposeContentTest {
     private val blePreCheck = mock<BlePreCheck>()
     private val iconsProvider = mock<IconsProvider>()
 
+    /** Not emulating by default — the emulator path skips the BLE pre-check. */
+    private val config = mock<AapsConfig> {
+        on { isEnabled(ExternalOptions.EMULATE_CARELEVO) } doReturn false
+    }
+
     /** Mocked so the screen's snackbar calls are verifiable without depending on snackbar animation/timing. */
     private val snackbarHostState: SnackbarHostState = mock {
         onBlocking { showSnackbar(any(), anyOrNull(), any(), any()) } doReturn SnackbarResult.Dismissed
@@ -124,7 +132,8 @@ class CarelevoComposeContentTest {
         carelevoAlarmNotifier = carelevoAlarmNotifier,
         protectionCheck = protectionCheck,
         blePreCheck = blePreCheck,
-        iconsProvider = iconsProvider
+        iconsProvider = iconsProvider,
+        config = config
     )
 
     /** Renders the overview route exactly as `Render` composes it for `activeWorkflowScreen == null`. */

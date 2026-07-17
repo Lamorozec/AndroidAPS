@@ -50,8 +50,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
@@ -313,9 +316,11 @@ class CarelevoOverviewViewModelTest {
     @After
     fun tearDown() {
         collectorScope.cancel()
-        // `onCleared` is protected, so cancel the scope directly: without this the endless
-        // second-tick collector outlives the test and resumes onto a dispatcher that no longer exists.
-        sut.viewModelScope.cancel()
+        // `onCleared` is protected, so cancel the scope directly: without this the endless second-tick
+        // collector outlives the test and resumes onto a dispatcher that no longer exists. Join rather
+        // than just cancel — cancel() only *requests* it, and an in-flight tick still resuming while
+        // resetMain() swaps the dispatcher out trips "Main is used concurrently with setting it".
+        runBlocking { sut.viewModelScope.coroutineContext.job.cancelAndJoin() }
         RxJavaPlugins.reset()
         Dispatchers.resetMain()
     }

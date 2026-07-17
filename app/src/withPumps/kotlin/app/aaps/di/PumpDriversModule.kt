@@ -31,7 +31,8 @@ import info.nightscout.pump.combov2.di.ComboV2Module
         MedtrumModule::class,
         EquilModule::class,
         EquilModules::class,
-        CarelevoModule::class
+        CarelevoModule::class,
+        CarelevoModules::class
     ]
 )
 @InstallIn(SingletonComponent::class)

@@ -1,6 +1,7 @@
 package app.aaps.pump.carelevo
 
 import android.content.Context
+import app.aaps.core.interfaces.configuration.Config
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.profile.Profile
 import app.aaps.core.interfaces.profile.ProfileFunction
@@ -96,6 +97,7 @@ abstract class CarelevoPumpPluginTestBase {
     @Mock lateinit var profileFunction: ProfileFunction
     @Mock lateinit var blePreCheck: BlePreCheck
     @Mock lateinit var iconsProvider: IconsProvider
+    @Mock lateinit var config: Config
     @Mock lateinit var context: Context
     @Mock lateinit var bolusProgressData: BolusProgressData
 
@@ -237,6 +239,7 @@ abstract class CarelevoPumpPluginTestBase {
             protectionCheck = protectionCheck,
             blePreCheck = blePreCheck,
             iconsProvider = iconsProvider,
+            config = config,
             uiInteraction = uiInteraction,
             pumpEnactResultProvider = pumpEnactResultProvider,
             carelevoPatch = carelevoPatch,

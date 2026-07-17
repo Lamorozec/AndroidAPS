@@ -16,6 +16,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.res.stringResource
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import app.aaps.core.interfaces.configuration.Config
+import app.aaps.core.interfaces.configuration.ExternalOptions
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.ui.R as CoreUiR
 import app.aaps.core.ui.compose.LocalSnackbarHostState
@@ -38,8 +40,15 @@ class CarelevoComposeContent(
     private val carelevoAlarmNotifier: CarelevoAlarmNotifier,
     private val protectionCheck: ProtectionCheck,
     private val blePreCheck: BlePreCheck,
-    private val iconsProvider: IconsProvider
+    private val iconsProvider: IconsProvider,
+    private val config: Config
 ) : ComposablePluginContent {
+
+    /**
+     * The emulated patch has no radio behind it, so the real BLE readiness check would fail the
+     * activation flow before it starts. Mirrors `DanaRSPairWizardViewModel.isEmulating`.
+     */
+    private val isEmulating: Boolean get() = config.isEnabled(ExternalOptions.EMULATE_CARELEVO)
 
     @Composable
     override fun Render(
@@ -127,10 +136,12 @@ class CarelevoComposeContent(
                 }
 
                 CarelevoScreenType.CONNECTION_FLOW_START -> {
-                    BlePreCheckHost(
-                        blePreCheck = blePreCheck,
-                        onFailed = { manualWorkflowScreen = null }
-                    )
+                    if (!isEmulating) {
+                        BlePreCheckHost(
+                            blePreCheck = blePreCheck,
+                            onFailed = { manualWorkflowScreen = null }
+                        )
+                    }
                     CarelevoPatchFlowScreen(
                         screenType = activeWorkflowScreen,
                         setToolbarConfig = setToolbarConfig,

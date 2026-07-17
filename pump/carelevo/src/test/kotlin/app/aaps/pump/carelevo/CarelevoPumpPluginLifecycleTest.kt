@@ -2,6 +2,9 @@ package app.aaps.pump.carelevo
 
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
+import app.aaps.core.interfaces.configuration.ExternalOptions
+// Aliased: the simple name collides with Robolectric's @Config annotation used below.
+import app.aaps.core.interfaces.configuration.Config as AapsConfig
 import android.content.Context
 import android.content.Intent
 import android.os.Looper
@@ -90,6 +93,7 @@ import org.junit.runner.RunWith
 import org.mockito.kotlin.any
 import org.mockito.kotlin.argumentCaptor
 import org.mockito.kotlin.atLeastOnce
+import org.mockito.kotlin.clearInvocations
 import org.mockito.kotlin.doAnswer
 import org.mockito.kotlin.eq
 import org.mockito.kotlin.mock
@@ -153,6 +157,7 @@ class CarelevoPumpPluginLifecycleTest {
     private lateinit var protectionCheck: ProtectionCheck
     private lateinit var blePreCheck: BlePreCheck
     private lateinit var iconsProvider: IconsProvider
+    private lateinit var config: AapsConfig
     private lateinit var uiInteraction: UiInteraction
     private lateinit var carelevoPatch: CarelevoPatch
     private lateinit var carelevoAlarmNotifier: CarelevoAlarmNotifier
@@ -201,6 +206,7 @@ class CarelevoPumpPluginLifecycleTest {
         protectionCheck = mock()
         blePreCheck = mock()
         iconsProvider = mock()
+        config = mock()
         uiInteraction = mock()
         carelevoPatch = mock()
         carelevoAlarmNotifier = mock()
@@ -289,6 +295,7 @@ class CarelevoPumpPluginLifecycleTest {
             protectionCheck = protectionCheck,
             blePreCheck = blePreCheck,
             iconsProvider = iconsProvider,
+            config = config,
             uiInteraction = uiInteraction,
             pumpEnactResultProvider = pumpEnactResultProvider,
             carelevoPatch = carelevoPatch,
@@ -536,6 +543,33 @@ class CarelevoPumpPluginLifecycleTest {
         val captor = argumentCaptor<BleState>()
         verify(carelevoPatch, atLeastOnce()).onBluetoothStateChanged(captor.capture())
         assertThat(captor.firstValue.isEnabled).isEqualTo(DeviceModuleState.DEVICE_STATE_OFF)
+    }
+
+    @Test
+    fun `while emulating the adapter is reported ON even though it is disabled`() {
+        // The emulated patch has no radio behind it, so every isBluetoothEnabled() gate in the
+        // coordinators and view models would otherwise refuse before reaching the emulated transport.
+        whenever(config.isEnabled(ExternalOptions.EMULATE_CARELEVO)).thenReturn(true)
+        setAdapterEnabled(false)
+
+        start()
+
+        val captor = argumentCaptor<BleState>()
+        verify(carelevoPatch, atLeastOnce()).onBluetoothStateChanged(captor.capture())
+        assertThat(captor.firstValue.isEnabled).isEqualTo(DeviceModuleState.DEVICE_STATE_ON)
+    }
+
+    @Test
+    fun `while emulating a host adapter OFF broadcast cannot kill the session`() {
+        whenever(config.isEnabled(ExternalOptions.EMULATE_CARELEVO)).thenReturn(true)
+        setAdapterEnabled(false)
+        start()
+        clearInvocations(carelevoPatch)
+
+        sendAdapterState(BluetoothAdapter.STATE_OFF)
+
+        // The receiver is never registered while emulating, so the broadcast reaches nothing.
+        verify(carelevoPatch, never()).onBluetoothStateChanged(any())
     }
 
     @Test
